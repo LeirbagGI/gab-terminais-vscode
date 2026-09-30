@@ -1,0 +1,141 @@
+{
+  "name": "gab-terminais",
+  "displayName": "Terminais tmux (GAB)",
+  "description": "Guarda os terminais criados: cada aba do VS Code e uma sessao tmux persistente, listada e reaberta sem Reload Window.",
+  "version": "1.4.0",
+  "publisher": "gab",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "views": {
+      "explorer": [
+        {
+          "id": "gabTerminais.lista",
+          "name": "Terminais tmux"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "gabTerminais.reabrirAbertas",
+        "title": "Reabrir as abas que estavam abertas",
+        "category": "Terminais tmux",
+        "icon": "$(history)"
+      },
+      {
+        "command": "gabTerminais.abrirTodos",
+        "title": "Abrir todos os terminais",
+        "category": "Terminais tmux",
+        "icon": "$(multiple-windows)"
+      },
+      {
+        "command": "gabTerminais.atualizar",
+        "title": "Atualizar lista",
+        "category": "Terminais tmux",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "gabTerminais.abrir",
+        "title": "Abrir este terminal",
+        "category": "Terminais tmux"
+      },
+      {
+        "command": "gabTerminais.renomear",
+        "title": "Renomear",
+        "category": "Terminais tmux",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "gabTerminais.fechar",
+        "title": "Encerrar de vez",
+        "category": "Terminais tmux",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "gabTerminais.destravar",
+        "title": "Destravar teclado (sair do copy-mode)",
+        "category": "Terminais tmux"
+      },
+      {
+        "command": "gabTerminais.assumir",
+        "title": "Assumir as abas (desligar o folderOpen do tasks.json)",
+        "category": "Terminais tmux"
+      },
+      {
+        "command": "gabTerminais.devolver",
+        "title": "Devolver as abas ao tasks.json",
+        "category": "Terminais tmux"
+      },
+      {
+        "command": "gabTerminais.verificarAtualizacao",
+        "title": "Procurar atualizacao",
+        "category": "Terminais tmux"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "gabTerminais.reabrirAbertas",
+          "when": "view == gabTerminais.lista",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gabTerminais.atualizar",
+          "when": "view == gabTerminais.lista",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "gabTerminais.renomear",
+          "when": "view == gabTerminais.lista && viewItem == sessao",
+          "group": "inline@1"
+        },
+        {
+          "command": "gabTerminais.fechar",
+          "when": "view == gabTerminais.lista && viewItem == sessao",
+          "group": "inline@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Terminais tmux (GAB)",
+      "properties": {
+        "gabTerminais.abrirAoIniciar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ao iniciar a janela, reabrir as abas que estavam abertas da ultima vez (registradas em ~/.gab-terminais-abertas.json). Reabre exatamente essas — nunca a lista inteira de sessoes guardadas."
+        },
+        "gabTerminais.intervalo": {
+          "type": "number",
+          "default": 5,
+          "minimum": 2,
+          "description": "Segundos entre releituras da lista de sessoes tmux. A lista tambem se atualiza na hora quando o manifesto muda."
+        },
+        "gabTerminais.mostrarVazios": {
+          "type": "boolean",
+          "default": true,
+          "description": "Mostrar na lista os terminais automaticos (terminal-N) que estao vazios. Eles aparecem marcados como 'vazio' e nao sao abertos por 'Abrir todos'."
+        },
+        "gabTerminais.verificarAtualizacoes": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ao abrir o VS Code (e a cada 6 h), conferir no GitHub se ha versao nova da extensao e oferecer para atualizar."
+        }
+      }
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LeirbagGI/gab-terminais-vscode"
+  }
+}
