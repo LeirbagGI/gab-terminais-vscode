@@ -94,10 +94,27 @@ function conf(chave, padrao) {
   return v === undefined || v === null || v === '' ? padrao : v;
 }
 
+// O tmux pode estar fora dos lugares de sempre (MacPorts, conda, Homebrew em
+// outra pasta). Ordem: os caminhos conhecidos, o atalho ~/bin/tmux que o
+// instalador cria, e por ultimo o shell de login do usuario (uma vez so).
+let tmuxAchado = null;
 function tmuxBin() {
-  for (const b of ['/opt/homebrew/bin/tmux', '/usr/local/bin/tmux', '/usr/bin/tmux']) {
-    try { fs.accessSync(b, fs.constants.X_OK); return b; } catch (e) { /* proximo */ }
+  if (tmuxAchado) return tmuxAchado;
+  const candidatos = ['/opt/homebrew/bin/tmux', '/usr/local/bin/tmux', path.join(HOME, 'bin', 'tmux'),
+    '/opt/local/bin/tmux', '/usr/bin/tmux'];
+  for (const b of candidatos) {
+    try { fs.accessSync(b, fs.constants.X_OK); tmuxAchado = b; return b; } catch (e) { /* proximo */ }
   }
+  try {
+    const achado = require('child_process')
+      .execFileSync('/bin/zsh', ['-lic', 'command -v tmux'], { timeout: 8000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      .trim().split('\n').pop();
+    if (achado && achado.startsWith('/')) {
+      fs.accessSync(achado, fs.constants.X_OK);
+      tmuxAchado = achado;
+      return achado;
+    }
+  } catch (e) { /* nao ha tmux no PATH do usuario */ }
   return 'tmux';
 }
 
@@ -473,14 +490,17 @@ const REPO = 'LeirbagGI/gab-terminais-vscode';
 // Por isso ela confere as pecas e, faltando alguma, oferece rodar o instalador
 // mais recente do GitHub. Subir VERSAO_SCRIPTS e o jeito de levar scripts
 // novos aos outros computadores.
-const VERSAO_SCRIPTS = 2;
+const VERSAO_SCRIPTS = 3;
 const ARQ_VERSAO = path.join(HOME, '.gab-terminais-versao');
 const URL_INSTALADOR = `https://github.com/${REPO}/releases/latest/download/Terminais-tmux-instalador.zip`;
 
 function problemasDaInstalacao() {
   const faltas = [];
   const existe = (f) => { try { fs.accessSync(f); return true; } catch (e) { return false; } };
-  if (tmuxBin() === 'tmux') faltas.push('tmux');
+  const t = tmuxBin();
+  if (t === 'tmux') faltas.push('tmux');
+  const conhecido = ['/opt/homebrew/bin/tmux', '/usr/local/bin/tmux'].some(existe) || existe(path.join(HOME, 'bin', 'tmux'));
+  if (t !== 'tmux' && !conhecido) faltas.push(`atalho para o tmux (${t})`);
   for (const n of ['gab-attach', 'gab-novo', 'gab-terminais-sync', 'gab-terminais-salvar', 'gab-terminais-restore']) {
     if (!existe(bin(n))) faltas.push(n);
   }
