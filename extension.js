@@ -238,6 +238,36 @@ function criadaPeloPerfil(t) {
   return t.name === PERFIL || (typeof o.shellPath === 'string' && o.shellPath.endsWith('/gab-novo'));
 }
 
+// Sessoes que JA aparecem numa aba do VS Code: tem um cliente tmux cujo pai e
+// o processo de terminais do VS Code (ptyHost). No reload/reabertura com a
+// persistencia nativa, o VS Code reconecta/recria as abas (com icone e cor)
+// antes ou logo depois de a extensao ativar. Abrir outra aba para essas
+// sessoes derrubava as do VS Code (o gab-attach usa -D) e o icone se perdia.
+async function sessoesEmAbasDoVSCode() {
+  const [cl, ps] = await Promise.all([
+    rodar(tmuxBin(), ['list-clients', '-F', '#{client_pid}\t#{client_session}']),
+    rodar('/bin/ps', ['-axo', 'pid=,ppid=,comm=']),
+  ]);
+  const pai = new Map();
+  const nome = new Map();
+  for (const linha of ps.saida.split('\n')) {
+    const m = linha.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    if (m) { pai.set(m[1], m[2]); nome.set(m[1], m[3]); }
+  }
+  const ehDoVSCode = (pid) => {
+    for (let p = pai.get(pid), i = 0; p && p !== '1' && i < 6; p = pai.get(p), i++) {
+      if (/Code Helper|Visual Studio Code|Electron/.test(nome.get(p) || '')) return true;
+    }
+    return false;
+  };
+  const out = new Set();
+  for (const linha of cl.saida.split('\n')) {
+    const i = linha.indexOf('\t');
+    if (i > 0 && ehDoVSCode(linha.slice(0, i))) out.add(linha.slice(i + 1));
+  }
+  return out;
+}
+
 async function sessaoDaAba(t, clientes) {
   for (const [nome, aba] of abertos) if (aba === t) return nome;
   let pid;
@@ -370,12 +400,17 @@ async function reabrirAbertas() {
   if (!querendo.length) return { criados: 0, total: 0 };
   const vivas = new Set((await sessoesVivas()).map((s) => s.nome));
   await adotarExistentes();
+  const jaEmAbas = await sessoesEmAbasDoVSCode();
   const corDoSync = new Map(((await queViramAba()) || [])
     .map((s) => [s.nome, s.icone && s.icone.color]));
   let criados = 0;
   for (const item of querendo) {
     const nome = nomeDe(item);
     if (!vivas.has(nome) || vivo(abertos.get(nome))) continue;
+    if (jaEmAbas.has(nome)) {
+      log(`nao reabri ${nome}: ja esta numa aba do VS Code`);
+      continue;
+    }
     // terminal-N vazio (sem nome, so o prompt) nao volta como aba: era assim
     // que os terminais criados sozinhos pelo VS Code se acumulavam a cada abertura.
     if (/^terminal-\d+$/.test(nome) && !aparenciaDe(nome).nome && await sessaoVazia(nome)) {
@@ -797,6 +832,25 @@ async function normalizarAba(t) {
   }
 }
 
+// Espera o VS Code terminar de recriar/reconectar as abas dele: pelo menos 3 s,
+// depois ate a quantidade de abas e de sessoes com cliente do VS Code ficar
+// igual por 2 s seguidos (no maximo 12 s).
+async function esperarAbasDoVSCode() {
+  if (!persistenciaNativa()) return;
+  await esperar(3000);
+  let antes = '';
+  let igual = 0;
+  const fim = Date.now() + 9000;
+  while (Date.now() < fim) {
+    const agora = `${vscode.window.terminals.length}|${[...(await sessoesEmAbasDoVSCode())].sort().join(',')}`;
+    igual = agora === antes ? igual + 1 : 0;
+    if (igual >= 4) break;
+    antes = agora;
+    await esperar(500);
+  }
+  log(`abas do VS Code estabilizaram: ${vscode.window.terminals.length} aba(s)`);
+}
+
 function activate(context) {
   const lista = new Lista();
   context.subscriptions.push(
@@ -1040,7 +1094,7 @@ function activate(context) {
 
   // Com a persistencia nativa o VS Code recria as abas logo ao abrir; da um
   // instante para elas aparecerem antes de decidir o que falta reabrir.
-  esperar(persistenciaNativa() ? 3000 : 0).then(() => recarregar(true)).then(() => {
+  esperarAbasDoVSCode().then(() => recarregar(true)).then(() => {
     if (!janelaDona()) { restaurando = false; return; }
     if (fs.existsSync(FLAG_FOLDEROPEN)) {
       if (conf('abrirAoIniciar', true)) {
