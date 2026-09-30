@@ -2,7 +2,7 @@
   "name": "gab-terminais",
   "displayName": "Terminal (GAB)",
   "description": "Guarda os terminais criados: cada aba do VS Code e uma sessao tmux persistente, listada e reaberta sem Reload Window.",
-  "version": "1.6.5",
+  "version": "1.7.0",
   "publisher": "gab",
   "license": "MIT",
   "icon": "icon.png",
@@ -159,6 +159,11 @@
           "type": "boolean",
           "default": true,
           "description": "Ao abrir o VS Code (e a cada 6 h), conferir no GitHub se ha versao nova da extensao e oferecer para atualizar."
+        },
+        "gabTerminais.persistenciaNativa": {
+          "type": "boolean",
+          "default": true,
+          "description": "Usar a persistencia do proprio VS Code para guardar icone, cor e nome escolhidos no menu nativo da aba. Desligue se aparecerem abas duplicadas."
         }
       }
     }

@@ -224,11 +224,25 @@ async function clientesTmux() {
   return m;
 }
 
+// A sessao que a aba foi criada para mostrar: "gab-attach NOME". Aba que o
+// proprio VS Code recriou (persistencia nativa) tem essa linha de comando antes
+// mesmo de o tmux conectar — e o que evita a extensao abrir outra por cima.
+function sessaoDoComando(t) {
+  const o = t.creationOptions || {};
+  const args = Array.isArray(o.shellArgs) ? o.shellArgs : [];
+  return typeof o.shellPath === 'string' && o.shellPath.endsWith('/gab-attach') && args[0] ? args[0] : null;
+}
+
+function criadaPeloPerfil(t) {
+  const o = t.creationOptions || {};
+  return t.name === PERFIL || (typeof o.shellPath === 'string' && o.shellPath.endsWith('/gab-novo'));
+}
+
 async function sessaoDaAba(t, clientes) {
   for (const [nome, aba] of abertos) if (aba === t) return nome;
   let pid;
   try { pid = await t.processId; } catch (e) { pid = undefined; }
-  return (pid && clientes.get(pid)) || null;
+  return (pid && clientes.get(pid)) || sessaoDoComando(t);
 }
 
 // Uma aba criada por outro caminho (a task antiga, o botao +, ou o proprio VS
@@ -529,7 +543,7 @@ const REPO = 'LeirbagGI/gab-terminais-vscode';
 // Por isso ela confere as pecas e, faltando alguma, oferece rodar o instalador
 // mais recente do GitHub. Subir VERSAO_SCRIPTS e o jeito de levar scripts
 // novos aos outros computadores.
-const VERSAO_SCRIPTS = 3;
+const VERSAO_SCRIPTS = 4;
 const ARQ_VERSAO = path.join(HOME, '.gab-terminais-versao');
 const URL_INSTALADOR = `https://github.com/${REPO}/releases/latest/download/Terminais-tmux-instalador.zip`;
 
@@ -687,7 +701,7 @@ let autoDescartado = false;
 const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function descartarTerminalAutomatico(t) {
-  if (autoDescartado || Date.now() - INICIO > 60000 || t.name !== PERFIL) return;
+  if ((autoDescartado && !persistenciaNativa()) || Date.now() - INICIO > 60000 || !criadaPeloPerfil(t)) return;
   if (!janelaDona() || !abertasSalvas().length) return;   // nada a restaurar: deixa o terminal
   // So descarta depois que a restauracao abriu alguma aba: sem isso o painel
   // podia ficar sem terminal nenhum.
@@ -722,6 +736,67 @@ async function descartarTerminalAutomatico(t) {
   mostrarAbaAtiva();
 }
 
+// --- persistencia nativa do VS Code -------------------------------------------
+//
+// O icone e a cor escolhidos no menu nativo ("Change Icon/Color") so sao
+// guardados pela persistencia do proprio VS Code: ao fechar ele grava cada aba
+// (comando, titulo, icone, cor) e ao abrir recria. Para isso funcionar com o
+// tmux, TODA aba precisa ser "gab-attach NOME": uma aba do botao + e "gab-novo"
+// sem nome, e seria recriada como um terminal NOVO. Por isso a aba do + e
+// trocada, logo que nasce, por uma "gab-attach <sua sessao>".
+// gabTerminais.persistenciaNativa = false desliga tudo (chave de emergencia).
+function persistenciaNativa() { return conf('persistenciaNativa', true); }
+
+async function ajustarPersistenciaNativa() {
+  const ti = vscode.workspace.getConfiguration('terminal.integrated');
+  const ligada = persistenciaNativa();
+  const quero = { enablePersistentSessions: ligada,
+    persistentSessionReviveProcess: ligada ? 'onExitAndWindowClose' : 'never' };
+  for (const [chave, valor] of Object.entries(quero)) {
+    if (ti.get(chave) !== valor) {
+      await ti.update(chave, valor, vscode.ConfigurationTarget.Global);
+      log(`ajustei terminal.integrated.${chave} = ${valor}`);
+    }
+  }
+}
+
+const normalizando = new Set();
+async function normalizarAba(t) {
+  if (!persistenciaNativa() || !vivo(t) || normalizando.has(t)) return;
+  if (Date.now() - INICIO < 60000) return;          // na abertura quem cuida e o descarte
+  const doComando = sessaoDoComando(t);
+  if (!criadaPeloPerfil(t) && !doComando) return;   // aba que nao e tmux
+  if (doComando) {
+    // Aba gab-attach: so precisa trocar se a sessao foi renomeada por dentro
+    // (gab-nome, Ctrl+b $) — senao o VS Code a recriaria no nome antigo.
+    let pid;
+    try { pid = await t.processId; } catch (e) { pid = undefined; }
+    const agora = pid && (await clientesTmux()).get(pid);
+    if (!agora || agora === doComando) return;
+  }
+  normalizando.add(t);
+  try {
+    let sessao = null;
+    for (let i = 0; i < 12 && !sessao && vivo(t); i++) {
+      let pid;
+      try { pid = await t.processId; } catch (e) { pid = undefined; }
+      sessao = (pid && (await clientesTmux()).get(pid)) || null;
+      if (!sessao) await esperar(500);
+    }
+    if (!sessao || !vivo(t)) return;
+    const ativa = vscode.window.activeTerminal === t;
+    const rotulo = t.name !== PERFIL && t.name !== sessao ? t.name : '';
+    if (rotulo) mudarAparencia(sessao, { nome: rotulo });
+    for (const [nome, aba] of abertos) if (aba === t) abertos.delete(nome);
+    const nova = abrir(sessao, null, false);
+    if (ativa) nova.show(false);
+    t.dispose();
+    log(`aba ${doComando ? `de ${doComando} (renomeada)` : 'do +'} trocada por gab-attach ${sessao}`);
+  } finally {
+    normalizando.delete(t);
+  }
+}
+
 function activate(context) {
   const lista = new Lista();
   context.subscriptions.push(
@@ -741,7 +816,22 @@ function activate(context) {
   });
   context.subscriptions.push({ dispose: () => fs.unwatchFile(MANIFESTO) });
 
-  const timer = setInterval(() => { recarregar(false); registrarAbertas(); }, Math.max(2, conf('intervalo', 5)) * 1000);
+  const timer = setInterval(() => {
+    recarregar(false);
+    registrarAbertas();
+    if (persistenciaNativa() && Date.now() - INICIO > 60000) {
+      clientesTmux().then(async (clientes) => {
+        for (const t of vscode.window.terminals) {
+          const doComando = sessaoDoComando(t);
+          if (!doComando || !vivo(t)) continue;
+          let pid;
+          try { pid = await t.processId; } catch (e) { pid = undefined; }
+          const agora = pid && clientes.get(pid);
+          if (agora && agora !== doComando) normalizarAba(t);
+        }
+      });
+    }
+  }, Math.max(2, conf('intervalo', 5)) * 1000);
   context.subscriptions.push({ dispose: () => clearInterval(timer) });
 
   context.subscriptions.push(
@@ -764,6 +854,7 @@ function activate(context) {
     }),
     vscode.window.onDidOpenTerminal((t) => {
       descartarTerminalAutomatico(t);
+      normalizarAba(t);
       adotarExistentes().then(() => { registrarAbertas(); recarregar(false); });
     }),
     // O titulo da aba muda quando ela e renomeada: regrava o rotulo.
@@ -936,9 +1027,20 @@ function activate(context) {
     },
   }));
 
+  ajustarPersistenciaNativa();
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
+    if (e.affectsConfiguration('gabTerminais.persistenciaNativa')) ajustarPersistenciaNativa();
+  }));
   for (const t of vscode.window.terminals) descartarTerminalAutomatico(t);
+  // Abas antigas do + (de antes desta versao) viram gab-attach depois da abertura.
+  const normalizarTodas = setTimeout(() => {
+    for (const t of vscode.window.terminals) normalizarAba(t);
+  }, 65000);
+  context.subscriptions.push({ dispose: () => clearTimeout(normalizarTodas) });
 
-  recarregar(true).then(() => {
+  // Com a persistencia nativa o VS Code recria as abas logo ao abrir; da um
+  // instante para elas aparecerem antes de decidir o que falta reabrir.
+  esperar(persistenciaNativa() ? 3000 : 0).then(() => recarregar(true)).then(() => {
     if (!janelaDona()) { restaurando = false; return; }
     if (fs.existsSync(FLAG_FOLDEROPEN)) {
       if (conf('abrirAoIniciar', true)) {
