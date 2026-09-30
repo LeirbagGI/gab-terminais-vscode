@@ -34,6 +34,18 @@ const ARQ_ABERTAS = path.join(HOME, '.gab-terminais-abertas.json');
 const ARQ_APARENCIA = path.join(HOME, '.gab-terminais-aparencia.json');
 const ARQ_ICONES = path.join(HOME, '.gab-terminais-icones.json');
 const PERFIL = 'tmux (persistente)';   // nome das abas criadas pelo botao +
+const ARQ_ATIVA = path.join(HOME, '.gab-terminais-ativa');
+const ARQ_LOG = path.join(HOME, 'Library', 'Logs', 'gab-terminais-extensao.log');
+
+// Log curto do que a extensao decide ao abrir. Serve para diagnosticar outros
+// computadores: "o que aconteceu?" vira ler este arquivo.
+function log(msg) {
+  try {
+    const st = fs.existsSync(ARQ_LOG) ? fs.statSync(ARQ_LOG) : null;
+    if (st && st.size > 512 * 1024) fs.renameSync(ARQ_LOG, ARQ_LOG + '.1');
+    fs.appendFileSync(ARQ_LOG, `[${new Date().toLocaleString('pt-BR')}] ${msg}\n`);
+  } catch (e) { /* log nunca quebra nada */ }
+}
 
 // --- aparencia de cada sessao (nome da aba, icone, cor) ----------------------
 //
@@ -350,6 +362,12 @@ async function reabrirAbertas() {
   for (const item of querendo) {
     const nome = nomeDe(item);
     if (!vivas.has(nome) || vivo(abertos.get(nome))) continue;
+    // terminal-N vazio (sem nome, so o prompt) nao volta como aba: era assim
+    // que os terminais criados sozinhos pelo VS Code se acumulavam a cada abertura.
+    if (/^terminal-\d+$/.test(nome) && !aparenciaDe(nome).nome && await sessaoVazia(nome)) {
+      log(`nao reabri ${nome}: vazio e sem nome`);
+      continue;
+    }
     abrir(nome, corDoSync.get(nome), false, rotuloDe(item));
     criados++;
   }
@@ -359,8 +377,27 @@ async function reabrirAbertas() {
 // No login o tmux pode estar recriando as sessoes enquanto a extensao sobe.
 // Tenta de novo ate todas as que estavam abertas existirem (prazo de 3 min) e
 // so entao libera o registro.
+async function sessaoVazia(sessao) {
+  const r = await rodar(tmuxBin(), ['display', '-p', '-t', `${sessao}:`, '#{pane_pid}\t#{pane_current_command}']);
+  const [pid, comando] = r.saida.trim().split('\t');
+  if (!pid || !/^-?(zsh|bash|sh|fish)$/.test(comando || '')) return false;
+  if ((await rodar('/usr/bin/pgrep', ['-P', pid])).saida.trim()) return false;
+  const tela = await rodar(tmuxBin(), ['capture-pane', '-p', '-t', `${sessao}:`]);
+  return tela.saida.split('\n').filter((l) => l.trim()).length <= 2;
+}
+
+// Ao terminar de restaurar, mostra o painel na aba em que a pessoa estava.
+// As abas sao criadas em segundo plano; sem isto o painel abria fechado.
+function mostrarAbaAtiva() {
+  let alvo = null;
+  try { alvo = abertos.get(fs.readFileSync(ARQ_ATIVA, 'utf8').trim()); } catch (e) { /* sem registro */ }
+  if (!vivo(alvo)) alvo = [...abertos.values()].find(vivo);
+  if (vivo(alvo)) alvo.show(true);
+}
+
 async function restaurarNoLogin() {
   const querendo = abertasSalvas();
+  log(`abrindo: ${querendo.length} aba(s) para restaurar`);
   const prazo = Date.now() + 180000;
   try {
     for (;;) {
@@ -371,6 +408,8 @@ async function restaurarNoLogin() {
     }
   } finally {
     restaurando = false;
+    log(`restauracao terminou: ${[...abertos.values()].filter(vivo).length} aba(s) tmux abertas`);
+    mostrarAbaAtiva();
     registrarAbertas();
   }
 }
@@ -640,12 +679,23 @@ async function verificarAtualizacao(context, manual) {
 // sessao terminal-N criada agora e nao tem nada rodando. Um terminal aberto de
 // proposito (ou que ja tinha algo) nunca e tocado.
 const INICIO = Date.now();
+// Hora em que o processo de extensoes subiu (logo que a janela abre). Medir
+// "recem-criado" so a partir da ativacao da extensao falhava em Mac lento: o
+// terminal do VS Code nascia mais de 15 s antes dela ativar.
+const INICIO_JANELA = Date.now() - process.uptime() * 1000;
 let autoDescartado = false;
 const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function descartarTerminalAutomatico(t) {
-  if (autoDescartado || Date.now() - INICIO > 45000 || t.name !== PERFIL) return;
+  if (autoDescartado || Date.now() - INICIO > 60000 || t.name !== PERFIL) return;
   if (!janelaDona() || !abertasSalvas().length) return;   // nada a restaurar: deixa o terminal
+  // So descarta depois que a restauracao abriu alguma aba: sem isso o painel
+  // podia ficar sem terminal nenhum.
+  for (let i = 0; i < 120 && restaurando; i++) await esperar(500);
+  if (![...abertos.values()].some((x) => x !== t && vivo(x))) {
+    log('terminal automatico mantido: nenhuma aba restaurada');
+    return;
+  }
   let sessao = null;
   for (let i = 0; i < 12 && !sessao; i++) {
     sessao = await sessaoDaAba(t, await clientesTmux());
@@ -655,7 +705,10 @@ async function descartarTerminalAutomatico(t) {
   const r = await rodar(tmuxBin(), ['display', '-p', '-t', `${sessao}:`,
     '#{session_created}\t#{pane_pid}\t#{pane_current_command}']);
   const [criada, pid, comando] = r.saida.trim().split('\t');
-  if (!pid || Number(criada) * 1000 < INICIO - 15000) return;   // sessao antiga, so reconectou
+  if (!pid || Number(criada) * 1000 < INICIO_JANELA - 30000) {   // sessao antiga, so reconectou
+    log(`terminal automatico ${sessao} mantido: sessao antiga`);
+    return;
+  }
   if (!/^-?(zsh|bash|sh|fish)$/.test(comando || '')) return;    // o painel nao e um shell
   const filhos = await rodar('/usr/bin/pgrep', ['-P', pid]);
   if (filhos.saida.trim()) return;                               // tem algo rodando
@@ -665,6 +718,8 @@ async function descartarTerminalAutomatico(t) {
   for (const [nome, aba] of abertos) if (aba === t) abertos.delete(nome);
   t.dispose();
   await rodar(tmuxBin(), ['kill-session', '-t', `=${sessao}`]);
+  log(`terminal automatico ${sessao} descartado`);
+  mostrarAbaAtiva();
 }
 
 function activate(context) {
@@ -701,6 +756,11 @@ function activate(context) {
       }
       registrarAbertas(true);
       recarregar(false);
+    }),
+    vscode.window.onDidChangeActiveTerminal(async (t) => {
+      if (!t || restaurando || encerrando) return;
+      const s = await sessaoDaAba(t, await clientesTmux());
+      if (s) try { fs.writeFileSync(ARQ_ATIVA, s); } catch (e) { /* ok */ }
     }),
     vscode.window.onDidOpenTerminal((t) => {
       descartarTerminalAutomatico(t);
