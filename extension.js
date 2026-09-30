@@ -31,6 +31,53 @@ const MANIFESTO = path.join(HOME, '.gab-terminais.json');
 const FLAG_FOLDEROPEN = path.join(HOME, '.gab-terminais-sem-folderopen');
 const ARQ_WORKSPACE = path.join(HOME, '.gab-terminais-workspace');
 const ARQ_ABERTAS = path.join(HOME, '.gab-terminais-abertas.json');
+const ARQ_APARENCIA = path.join(HOME, '.gab-terminais-aparencia.json');
+const ARQ_ICONES = path.join(HOME, '.gab-terminais-icones.json');
+const PERFIL = 'tmux (persistente)';   // nome das abas criadas pelo botao +
+
+// --- aparencia de cada sessao (nome da aba, icone, cor) ----------------------
+//
+// A API do VS Code deixa ler o NOME de uma aba, mas nao o icone nem a cor que o
+// usuario escolhe no menu nativo. Por isso icone e cor sao trocados pelo
+// comando da extensao ("Mudar icone e cor"), que grava aqui. O nome e gravado
+// sozinho quando a aba e renomeada. Chave = sessao tmux, entao vale mesmo com a
+// aba fechada e depois de reboot.
+function lerJSON(arq) {
+  try { return JSON.parse(fs.readFileSync(arq, 'utf8')) || {}; } catch (e) { return {}; }
+}
+
+function gravarJSON(arq, dados) {
+  try {
+    const tmp = `${arq}.tmp.${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(dados, null, 2));
+    fs.renameSync(tmp, arq);
+  } catch (e) { /* sem registro e melhor do que quebrar a janela */ }
+}
+
+function aparenciaDe(sessao) {
+  const antigo = lerJSON(ARQ_ICONES)[sessao] || {};      // usado tambem pelo tasks.json
+  const ap = lerJSON(ARQ_APARENCIA)[sessao] || {};
+  return {
+    nome: ap.nome || '',
+    icone: ap.icone || antigo.id || 'terminal',
+    cor: ap.cor || antigo.color || '',
+  };
+}
+
+function mudarAparencia(sessao, mudancas) {
+  const todas = lerJSON(ARQ_APARENCIA);
+  const ap = { ...(todas[sessao] || {}), ...mudancas };
+  for (const k of Object.keys(ap)) if (!ap[k]) delete ap[k];
+  if (Object.keys(ap).length) todas[sessao] = ap; else delete todas[sessao];
+  gravarJSON(ARQ_APARENCIA, todas);
+  // O tasks.json (gab-terminais-sync) le icone e cor daqui.
+  if (mudancas.icone !== undefined || mudancas.cor !== undefined) {
+    const ic = lerJSON(ARQ_ICONES);
+    const atual = aparenciaDe(sessao);
+    ic[sessao] = { id: atual.icone, color: atual.cor || 'terminal.ansiWhite' };
+    gravarJSON(ARQ_ICONES, ic);
+  }
+}
 
 const bin = (n) => path.join(HOME, 'bin', n);
 
@@ -164,12 +211,14 @@ function vivo(t) { return t && t.exitStatus === undefined; }
 function abrir(nome, cor, focar, rotulo) {
   let t = abertos.get(nome);
   if (!vivo(t)) {
+    const ap = aparenciaDe(nome);
+    const c = ap.cor || cor;
     t = vscode.window.createTerminal({
-      name: rotulo || nome,
+      name: ap.nome || rotulo || nome,
       shellPath: bin('gab-attach'),
       shellArgs: [nome],
-      iconPath: new vscode.ThemeIcon('terminal'),
-      color: cor ? new vscode.ThemeColor(cor) : undefined,
+      iconPath: new vscode.ThemeIcon(ap.icone),
+      color: c ? new vscode.ThemeColor(c) : undefined,
     });
     abertos.set(nome, t);
   }
@@ -209,7 +258,14 @@ function registrarAbertas(encolher = false) {
       const sessao = await sessaoDaAba(t, clientes);
       if (!sessao || vistas.has(sessao)) continue;   // aba que nao e tmux
       vistas.add(sessao);
-      lista.push(t.name === sessao ? sessao : { sessao, aba: t.name });
+      // Nome dado a aba fica guardado por sessao (vale com a aba fechada).
+      // O nome do perfil ("tmux (persistente)") nao e escolha de ninguem.
+      if (t.name && t.name !== PERFIL) {
+        const guardado = aparenciaDe(sessao).nome;
+        const novo = t.name === sessao ? '' : t.name;
+        if (novo !== guardado) mudarAparencia(sessao, { nome: novo });
+      }
+      lista.push(sessao);
     }
     // Lista vazia nunca e gravada. No fechamento do VS Code todas as abas sao
     // descartadas de uma vez: se isso virasse registro, o proximo login abriria
@@ -328,17 +384,19 @@ class Lista {
   }
 
   getTreeItem(s) {
-    const item = new vscode.TreeItem(s.nome, vscode.TreeItemCollapsibleState.None);
+    const ap = aparenciaDe(s.nome);
+    const item = new vscode.TreeItem(ap.nome || s.nome, vscode.TreeItemCollapsibleState.None);
     const marcas = [];
+    if (ap.nome) marcas.push(s.nome);
     if (vivo(abertos.get(s.nome))) marcas.push('aberto');
     if (s.comando && s.comando !== 'zsh' && s.comando !== 'bash') marcas.push(s.comando);
     if (s.copyMode) marcas.push('travado (copy-mode)');
     if (!this.viramAba.has(s.nome)) marcas.push('vazio');
     item.description = marcas.join(' · ');
     item.contextValue = 'sessao';
-    item.iconPath = new vscode.ThemeIcon(
-      s.copyMode ? 'warning' : vivo(abertos.get(s.nome)) ? 'terminal-view-icon' : 'terminal',
-    );
+    item.iconPath = s.copyMode
+      ? new vscode.ThemeIcon('warning')
+      : new vscode.ThemeIcon(ap.icone, ap.cor ? new vscode.ThemeColor(ap.cor) : undefined);
     item.tooltip = new vscode.MarkdownString(
       `**${s.nome}**\n\n` +
       `pasta: \`${s.cwd}\`\n\n` +
@@ -358,6 +416,30 @@ class Lista {
 }
 
 // --- ciclo de vida ----------------------------------------------------------
+
+const ICONES = [
+  ['terminal', 'terminal'], ['rocket', 'foguete'], ['coffee', 'cafe'], ['github', 'github'],
+  ['zap', 'raio'], ['star-full', 'estrela'], ['heart', 'coracao'], ['flame', 'fogo'],
+  ['home', 'casa'], ['briefcase', 'maleta'], ['calendar', 'calendario'], ['mail', 'e-mail'],
+  ['globe', 'globo / site'], ['device-camera-video', 'video'], ['device-camera', 'camera / foto'],
+  ['play', 'play'], ['music', 'musica'], ['broadcast', 'transmissao'], ['megaphone', 'megafone'],
+  ['comment-discussion', 'conversa'], ['robot', 'robo / bot'], ['sparkle', 'IA'], ['lightbulb', 'ideia'],
+  ['tools', 'ferramentas'], ['gear', 'engrenagem'], ['bug', 'bug'], ['beaker', 'teste'],
+  ['database', 'banco de dados'], ['server', 'servidor'], ['cloud', 'nuvem'], ['package', 'pacote'],
+  ['shield', 'escudo / seguranca'], ['lock', 'cadeado'], ['key', 'chave'], ['credit-card', 'cartao / pagamento'],
+  ['graph', 'grafico'], ['pie-chart', 'pizza'], ['file', 'arquivo'], ['folder', 'pasta'],
+  ['book', 'livro'], ['pencil', 'lapis'], ['paintcase', 'pintura / arte'], ['symbol-color', 'cores'],
+  ['vm', 'computador'], ['device-mobile', 'celular'], ['print', 'impressora'], ['person', 'pessoa'],
+  ['organization', 'equipe'], ['tag', 'etiqueta'], ['bell', 'sino'], ['pin', 'alfinete'],
+  ['flag', 'bandeira'], ['target', 'alvo'], ['trophy', 'trofeu'], ['gift', 'presente'],
+];
+const CORES_ABA = [
+  ['', 'Sem cor'],
+  ['terminal.ansiRed', '🔴 Vermelho'], ['terminal.ansiGreen', '🟢 Verde'],
+  ['terminal.ansiYellow', '🟡 Amarelo'], ['terminal.ansiBlue', '🔵 Azul'],
+  ['terminal.ansiMagenta', '🟣 Magenta'], ['terminal.ansiCyan', '🩵 Ciano'],
+  ['terminal.ansiWhite', '⚪ Branco'],
+];
 
 // --- atualizacao pela internet ---------------------------------------------
 //
@@ -546,10 +628,48 @@ function activate(context) {
       vscode.window.showErrorMessage(`Nao consegui renomear: ${r.erro}`);
       return;
     }
+    const todas = lerJSON(ARQ_APARENCIA);
+    if (todas[antigo]) {
+      todas[novo.trim()] = todas[antigo];
+      delete todas[antigo];
+      gravarJSON(ARQ_APARENCIA, todas);
+    }
     const aba = abertos.get(antigo);
     if (vivo(aba)) { aba.dispose(); abertos.delete(antigo); }
     abrir(novo.trim(), null, false);
     recarregar(true);
+  });
+
+  cmd('gabTerminais.aparencia', async (s) => {
+    let sessao = typeof s === 'string' ? s : s && s.nome;
+    if (!sessao && vscode.window.activeTerminal) {
+      sessao = await sessaoDaAba(vscode.window.activeTerminal, await clientesTmux());
+    }
+    if (!sessao) {
+      vscode.window.showWarningMessage('Terminais tmux: clique antes numa aba de terminal tmux.');
+      return;
+    }
+    const atual = aparenciaDe(sessao);
+    const icone = await vscode.window.showQuickPick(
+      ICONES.map(([id, rotulo]) => ({ label: `$(${id})  ${rotulo}`, id, picked: id === atual.icone,
+        description: id === atual.icone ? 'atual' : '' })),
+      { title: `Icone de "${atual.nome || sessao}"`, matchOnDescription: true },
+    );
+    if (!icone) return;
+    const cor = await vscode.window.showQuickPick(
+      CORES_ABA.map(([id, rotulo]) => ({ label: rotulo, id, description: id === atual.cor ? 'atual' : '' })),
+      { title: `Cor de "${atual.nome || sessao}"` },
+    );
+    if (!cor) return;
+    mudarAparencia(sessao, { icone: icone.id, cor: cor.id });
+    // Icone e cor so se aplicam ao criar a aba: recria a aba, a sessao continua
+    // a mesma (o gab-attach reconecta) e nada do que roda nela e interrompido.
+    const aba = abertos.get(sessao) || vscode.window.activeTerminal;
+    const nome = aba && aba.name !== PERFIL && aba.name !== sessao ? aba.name : '';
+    if (nome) mudarAparencia(sessao, { nome });
+    if (aba && vivo(aba)) { abertos.delete(sessao); aba.dispose(); }
+    abrir(sessao, null, true);
+    lista.atualizar();
   });
 
   cmd('gabTerminais.fechar', async (s) => {
