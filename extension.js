@@ -465,6 +465,66 @@ const CORES_ABA = [
 // oferece "Atualizar", baixa o .vsix e instala pela propria API do VS Code.
 const REPO = 'LeirbagGI/gab-terminais-vscode';
 
+// --- verificacao da instalacao ----------------------------------------------
+//
+// A extensao sozinha nao guarda terminal nenhum: quem guarda sao o tmux, os
+// scripts gab-* e o LaunchAgent do login. Num computador em que o instalador
+// nao rodou (ou rodou uma versao velha) tudo parece funcionar e nada volta.
+// Por isso ela confere as pecas e, faltando alguma, oferece rodar o instalador
+// mais recente do GitHub. Subir VERSAO_SCRIPTS e o jeito de levar scripts
+// novos aos outros computadores.
+const VERSAO_SCRIPTS = 2;
+const ARQ_VERSAO = path.join(HOME, '.gab-terminais-versao');
+const URL_INSTALADOR = `https://github.com/${REPO}/releases/latest/download/Terminais-tmux-instalador.zip`;
+
+function problemasDaInstalacao() {
+  const faltas = [];
+  const existe = (f) => { try { fs.accessSync(f); return true; } catch (e) { return false; } };
+  if (tmuxBin() === 'tmux') faltas.push('tmux');
+  for (const n of ['gab-attach', 'gab-novo', 'gab-terminais-sync', 'gab-terminais-salvar', 'gab-terminais-restore']) {
+    if (!existe(bin(n))) faltas.push(n);
+  }
+  const perfil = vscode.workspace.getConfiguration('terminal.integrated').get('defaultProfile.osx');
+  if (perfil !== PERFIL) faltas.push('tmux como terminal padrao do VS Code');
+  if (!existe(path.join(HOME, 'Library', 'LaunchAgents', 'com.gab.terminais.plist'))) {
+    faltas.push('recriar os terminais no login');
+  }
+  let versao = 0;
+  try { versao = Number(fs.readFileSync(ARQ_VERSAO, 'utf8').trim()) || 0; } catch (e) { /* nunca instalado */ }
+  if (!faltas.length && versao < VERSAO_SCRIPTS) faltas.push('scripts desatualizados');
+  return faltas;
+}
+
+function reparar() {
+  const cmdInstalar = [
+    'cd /tmp',
+    `curl -fsSL -o gab-terminais-instalador.zip ${URL_INSTALADOR}`,
+    'rm -rf Terminais-tmux',
+    'unzip -oq gab-terminais-instalador.zip',
+    'bash Terminais-tmux/instalar.sh',
+  ].join(' && ');
+  const t = vscode.window.createTerminal({
+    name: 'Instalando Terminais tmux',
+    shellPath: '/bin/zsh',
+    shellArgs: ['-lc', `${cmdInstalar}; echo; echo "Terminou. Feche e abra o VS Code (ou Developer: Reload Window)."; read -k1`],
+    iconPath: new vscode.ThemeIcon('tools'),
+  });
+  t.show();
+}
+
+async function verificarInstalacao(manual) {
+  const faltas = problemasDaInstalacao();
+  if (!faltas.length) {
+    if (manual) vscode.window.showInformationMessage('Terminais tmux: instalacao completa neste computador.');
+    return;
+  }
+  const escolha = await vscode.window.showWarningMessage(
+    `Terminais tmux: os terminais NAO estao sendo guardados neste computador. Falta: ${faltas.join(', ')}.`,
+    'Reparar agora', 'Depois',
+  );
+  if (escolha === 'Reparar agora') reparar();
+}
+
 function baixar(url, destino, saltos = 5) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
@@ -600,6 +660,9 @@ function activate(context) {
   cmd('gabTerminais.atualizar', () => recarregar(true));
 
   cmd('gabTerminais.verificarAtualizacao', () => verificarAtualizacao(context, true));
+  cmd('gabTerminais.verificarInstalacao', () => verificarInstalacao(true));
+  const conferir = setTimeout(() => verificarInstalacao(false), 8000);
+  context.subscriptions.push({ dispose: () => clearTimeout(conferir) });
   if (conf('verificarAtualizacoes', true)) {
     const primeira = setTimeout(() => verificarAtualizacao(context, false), 30000);
     const periodica = setInterval(() => verificarAtualizacao(context, false), 6 * 3600 * 1000);
