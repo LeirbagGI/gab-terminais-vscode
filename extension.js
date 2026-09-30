@@ -64,6 +64,14 @@ function aparenciaDe(sessao) {
   };
 }
 
+const RODIZIO = ['terminal.ansiMagenta', 'terminal.ansiRed', 'terminal.ansiGreen',
+  'terminal.ansiBlue', 'terminal.ansiYellow', 'terminal.ansiCyan'];
+function corPadrao(nome) {
+  let h = 0;
+  for (const ch of nome) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  return RODIZIO[h % RODIZIO.length];
+}
+
 function mudarAparencia(sessao, mudancas) {
   const todas = lerJSON(ARQ_APARENCIA);
   const ap = { ...(todas[sessao] || {}), ...mudancas };
@@ -74,7 +82,7 @@ function mudarAparencia(sessao, mudancas) {
   if (mudancas.icone !== undefined || mudancas.cor !== undefined) {
     const ic = lerJSON(ARQ_ICONES);
     const atual = aparenciaDe(sessao);
-    ic[sessao] = { id: atual.icone, color: atual.cor || 'terminal.ansiWhite' };
+    ic[sessao] = { id: atual.icone, color: atual.cor && atual.cor !== 'nenhuma' ? atual.cor : 'terminal.ansiWhite' };
     gravarJSON(ARQ_ICONES, ic);
   }
 }
@@ -212,13 +220,20 @@ function abrir(nome, cor, focar, rotulo) {
   let t = abertos.get(nome);
   if (!vivo(t)) {
     const ap = aparenciaDe(nome);
-    const c = ap.cor || cor;
+    // Sessao sem cor guardada recebe a cor que o metodo antigo (tasks.json)
+    // mostrava, e ela e GRAVADA: antes a cor vinha de um rodizio pela posicao
+    // na lista, entao mudava quando nascia um terminal e sumia ao reabrir.
+    let c = ap.cor;
+    if (!c) {
+      c = cor || corPadrao(nome);
+      mudarAparencia(nome, { cor: c });
+    }
     t = vscode.window.createTerminal({
       name: ap.nome || rotulo || nome,
       shellPath: bin('gab-attach'),
       shellArgs: [nome],
       iconPath: new vscode.ThemeIcon(ap.icone),
-      color: c ? new vscode.ThemeColor(c) : undefined,
+      color: c && c !== 'nenhuma' ? new vscode.ThemeColor(c) : undefined,
     });
     abertos.set(nome, t);
   }
@@ -312,11 +327,13 @@ async function reabrirAbertas() {
   if (!querendo.length) return { criados: 0, total: 0 };
   const vivas = new Set((await sessoesVivas()).map((s) => s.nome));
   await adotarExistentes();
+  const corDoSync = new Map(((await queViramAba()) || [])
+    .map((s) => [s.nome, s.icone && s.icone.color]));
   let criados = 0;
   for (const item of querendo) {
     const nome = nomeDe(item);
     if (!vivas.has(nome) || vivo(abertos.get(nome))) continue;
-    abrir(nome, null, false, rotuloDe(item));
+    abrir(nome, corDoSync.get(nome), false, rotuloDe(item));
     criados++;
   }
   return { criados, total: querendo.length };
@@ -396,7 +413,7 @@ class Lista {
     item.contextValue = 'sessao';
     item.iconPath = s.copyMode
       ? new vscode.ThemeIcon('warning')
-      : new vscode.ThemeIcon(ap.icone, ap.cor ? new vscode.ThemeColor(ap.cor) : undefined);
+      : new vscode.ThemeIcon(ap.icone, ap.cor && ap.cor !== 'nenhuma' ? new vscode.ThemeColor(ap.cor) : undefined);
     item.tooltip = new vscode.MarkdownString(
       `**${s.nome}**\n\n` +
       `pasta: \`${s.cwd}\`\n\n` +
@@ -434,7 +451,7 @@ const ICONES = [
   ['flag', 'bandeira'], ['target', 'alvo'], ['trophy', 'trofeu'], ['gift', 'presente'],
 ];
 const CORES_ABA = [
-  ['', 'Sem cor'],
+  ['nenhuma', 'Sem cor'],
   ['terminal.ansiRed', '🔴 Vermelho'], ['terminal.ansiGreen', '🟢 Verde'],
   ['terminal.ansiYellow', '🟡 Amarelo'], ['terminal.ansiBlue', '🔵 Azul'],
   ['terminal.ansiMagenta', '🟣 Magenta'], ['terminal.ansiCyan', '🩵 Ciano'],
