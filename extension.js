@@ -631,6 +631,42 @@ async function verificarAtualizacao(context, manual) {
   }
 }
 
+// --- o terminal que o VS Code cria sozinho ao abrir ---------------------------
+//
+// Se o painel de terminal estava aberto quando o VS Code fechou, ele cria um
+// terminal padrao ao reabrir. Com o perfil tmux isso vira uma sessao
+// terminal-N nova a CADA reabertura, alem das abas que a extensao restaura.
+// Descarta so esse: nasceu nos primeiros segundos, e do perfil padrao, e uma
+// sessao terminal-N criada agora e nao tem nada rodando. Um terminal aberto de
+// proposito (ou que ja tinha algo) nunca e tocado.
+const INICIO = Date.now();
+let autoDescartado = false;
+const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function descartarTerminalAutomatico(t) {
+  if (autoDescartado || Date.now() - INICIO > 45000 || t.name !== PERFIL) return;
+  if (!janelaDona() || !abertasSalvas().length) return;   // nada a restaurar: deixa o terminal
+  let sessao = null;
+  for (let i = 0; i < 12 && !sessao; i++) {
+    sessao = await sessaoDaAba(t, await clientesTmux());
+    if (!sessao) await esperar(500);
+  }
+  if (!sessao || !/^terminal-\d+$/.test(sessao) || !vivo(t) || autoDescartado) return;
+  const r = await rodar(tmuxBin(), ['display', '-p', '-t', `${sessao}:`,
+    '#{session_created}\t#{pane_pid}\t#{pane_current_command}']);
+  const [criada, pid, comando] = r.saida.trim().split('\t');
+  if (!pid || Number(criada) * 1000 < INICIO - 15000) return;   // sessao antiga, so reconectou
+  if (!/^-?(zsh|bash|sh|fish)$/.test(comando || '')) return;    // o painel nao e um shell
+  const filhos = await rodar('/usr/bin/pgrep', ['-P', pid]);
+  if (filhos.saida.trim()) return;                               // tem algo rodando
+  const tela = await rodar(tmuxBin(), ['capture-pane', '-p', '-t', `${sessao}:`]);
+  if (tela.saida.split('\n').filter((l) => l.trim()).length > 2) return;   // ja tem conteudo
+  autoDescartado = true;
+  for (const [nome, aba] of abertos) if (aba === t) abertos.delete(nome);
+  t.dispose();
+  await rodar(tmuxBin(), ['kill-session', '-t', `=${sessao}`]);
+}
+
 function activate(context) {
   const lista = new Lista();
   context.subscriptions.push(
@@ -666,7 +702,8 @@ function activate(context) {
       registrarAbertas(true);
       recarregar(false);
     }),
-    vscode.window.onDidOpenTerminal(() => {
+    vscode.window.onDidOpenTerminal((t) => {
+      descartarTerminalAutomatico(t);
       adotarExistentes().then(() => { registrarAbertas(); recarregar(false); });
     }),
     // O titulo da aba muda quando ela e renomeada: regrava o rotulo.
@@ -838,6 +875,8 @@ function activate(context) {
       }
     },
   }));
+
+  for (const t of vscode.window.terminals) descartarTerminalAutomatico(t);
 
   recarregar(true).then(() => {
     if (!janelaDona()) { restaurando = false; return; }
