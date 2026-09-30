@@ -1,4 +1,4 @@
-# Terminais tmux (GAB)
+# Terminal (GAB)
 
 Cada aba de terminal do VS Code e uma sessao tmux persistente. Esta extensao
 lista essas sessoes na barra lateral e reabre as abas — sem `Reload Window` e

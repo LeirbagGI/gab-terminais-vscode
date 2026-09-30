@@ -1,8 +1,8 @@
 {
   "name": "gab-terminais",
-  "displayName": "Terminais tmux (GAB)",
+  "displayName": "Terminal (GAB)",
   "description": "Guarda os terminais criados: cada aba do VS Code e uma sessao tmux persistente, listada e reaberta sem Reload Window.",
-  "version": "1.6.4",
+  "version": "1.6.5",
   "publisher": "gab",
   "license": "MIT",
   "icon": "icon.png",
@@ -137,7 +137,7 @@
       ]
     },
     "configuration": {
-      "title": "Terminais tmux (GAB)",
+      "title": "Terminal (GAB)",
       "properties": {
         "gabTerminais.abrirAoIniciar": {
           "type": "boolean",
