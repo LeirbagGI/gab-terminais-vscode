@@ -34,6 +34,8 @@ const ARQ_ABERTAS = path.join(HOME, '.gab-terminais-abertas.json');
 const ARQ_APARENCIA = path.join(HOME, '.gab-terminais-aparencia.json');
 const ARQ_ICONES = path.join(HOME, '.gab-terminais-icones.json');
 const ARQ_CRIACAO = path.join(HOME, '.gab-terminais-criacao.json');
+const ARQ_ORDEM = path.join(HOME, '.gab-terminais-ordem.json');        // ordem das abas que a extensao conhece
+const ARQ_ORDEM_MANUAL = path.join(HOME, '.gab-terminais-ordem-manual'); // bandeira: a pessoa arrumou as abas
 const PERFIL = 'tmux (persistente)';   // nome das abas criadas pelo botao +
 const ARQ_ATIVA = path.join(HOME, '.gab-terminais-ativa');
 const ARQ_LOG = path.join(HOME, 'Library', 'Logs', 'gab-terminais-extensao.log');
@@ -414,6 +416,7 @@ function registrarAbertas(encolher = false) {
     // descartadas de uma vez: se isso virasse registro, o proximo login abriria
     // nada e o trabalho pareceria perdido.
     if (!lista.length || encerrando) return;
+    gravarOrdemConhecida(lista);
     // A ORDEM da lista e a ordem em que as abas voltam: a data em que cada
     // terminal foi aberto (ate a 1.7.3 era alfabetica, e a pessoa se perdia).
     const salvas = abertasSalvas();
@@ -488,6 +491,43 @@ async function reabrirAbertas() {
   return { criados, total: querendo.length };
 }
 
+// --- a ordem que a pessoa escolheu ------------------------------------------
+//
+// A data de abertura e so o PADRAO. Se a pessoa arrastar as abas para a ordem
+// dela, a extensao nunca mais reorganiza. A API nao mostra a ordem da tela
+// (vscode.window.terminals segue a ordem de criacao e nao muda quando se
+// arrasta), mas o VS Code recria as abas na ordem da tela. Entao: a extensao
+// guarda a ordem que conhece, e se na reabertura o VS Code trouxer outra, foi a
+// pessoa que arrumou. O comando "Organizar por data" devolve ao padrao.
+async function sessoesNaOrdemDasAbas() {
+  const clientes = await clientesTmux();
+  const out = [];
+  for (const t of vscode.window.terminals) {
+    if (!vivo(t)) continue;
+    const s = await sessaoDaAba(t, clientes);
+    if (s && !out.includes(s)) out.push(s);
+  }
+  return out;
+}
+
+function gravarOrdemConhecida(lista) {
+  let antes = null;
+  try { antes = fs.readFileSync(ARQ_ORDEM, 'utf8'); } catch (e) { /* primeira vez */ }
+  const agora = JSON.stringify(lista);
+  if (agora !== antes) try { fs.writeFileSync(ARQ_ORDEM, agora); } catch (e) { /* ok */ }
+}
+
+function ordemFoiArrumada(trazidas) {
+  let conhecida = [];
+  try { conhecida = JSON.parse(fs.readFileSync(ARQ_ORDEM, 'utf8')); } catch (e) { return false; }
+  if (!Array.isArray(conhecida)) return false;
+  const a = trazidas.filter((s) => conhecida.includes(s));
+  const b = conhecida.filter((s) => a.includes(s));
+  return a.length > 1 && a.join('\n') !== b.join('\n');
+}
+
+function ordemManual() { return fs.existsSync(ARQ_ORDEM_MANUAL); }
+
 // Poe as abas tmux na ordem em que os terminais foram abertos (mais antigo
 // primeiro). O VS Code recria as abas na ordem em que estavam na tela e nao ha
 // API para mover uma aba; o unico jeito e recriar, no fim, cada aba a partir da
@@ -549,6 +589,12 @@ async function restaurarNoLogin() {
   const querendo = abertasSalvas();
   log(`abrindo: ${querendo.length} aba(s) para restaurar`);
   const prazo = Date.now() + 180000;
+  // A ordem em que o VS Code trouxe as abas = a ordem da tela ao fechar.
+  const trazidas = await sessoesNaOrdemDasAbas();
+  if (!ordemManual() && ordemFoiArrumada(trazidas)) {
+    try { fs.writeFileSync(ARQ_ORDEM_MANUAL, new Date().toISOString() + '\n'); } catch (e) { /* ok */ }
+    log(`ordem arrumada pela pessoa (${trazidas.join(', ')}): nao reorganizo mais por data`);
+  }
   try {
     for (;;) {
       await reabrirAbertas();
@@ -557,7 +603,7 @@ async function restaurarNoLogin() {
       await new Promise((r) => setTimeout(r, 5000));
     }
   } finally {
-    if (conf('ordenarPorData', true)) {
+    if (conf('ordenarPorData', true) && !ordemManual()) {
       try { await organizarPorData(); } catch (e) { log(`organizar por data falhou: ${e.message}`); }
     }
     restaurando = false;
@@ -1065,6 +1111,7 @@ function activate(context) {
     // aba velha poderia encolher a lista).
     restaurando = true;
     let n = 0;
+    try { fs.unlinkSync(ARQ_ORDEM_MANUAL); } catch (e) { /* nao havia */ }
     try { n = await organizarPorData(); } finally {
       restaurando = false;
       registrarAbertas();
