@@ -821,6 +821,7 @@ async function ajustarPersistenciaNativa() {
 }
 
 const normalizando = new Set();
+const nascimento = new WeakMap();   // aba -> quando ela apareceu
 async function normalizarAba(t) {
   if (!persistenciaNativa() || !vivo(t) || normalizando.has(t)) return;
   if (Date.now() - INICIO < 60000) return;          // na abertura quem cuida e o descarte
@@ -844,6 +845,16 @@ async function normalizarAba(t) {
       if (!sessao) await esperar(500);
     }
     if (!sessao || !vivo(t)) return;
+    // So a aba do + de verdade e trocada: o gab-novo sem nome cria um terminal-N
+    // NOVO na hora. As abas que o proprio VS Code recriou ao abrir tambem
+    // aparecem como "do perfil", mas mostram sessoes antigas. Troca-las (1.7.0 a
+    // 1.7.2) recriava todas de uma vez, em paralelo, e embaralhava a ordem.
+    if (!doComando) {
+      if (!/^terminal-\d+$/.test(sessao)) return;
+      const r = await rodar(tmuxBin(), ['display', '-p', '-t', `${sessao}:`, '#{session_created}']);
+      const criada = Number(r.saida.trim()) * 1000;
+      if (!criada || criada < (nascimento.get(t) || Date.now()) - 10000) return;
+    }
     const ativa = vscode.window.activeTerminal === t;
     const rotulo = t.name !== PERFIL && t.name !== sessao ? t.name : '';
     if (rotulo) mudarAparencia(sessao, { nome: rotulo });
@@ -932,6 +943,7 @@ function activate(context) {
       if (s) try { fs.writeFileSync(ARQ_ATIVA, s); } catch (e) { /* ok */ }
     }),
     vscode.window.onDidOpenTerminal((t) => {
+      nascimento.set(t, Date.now());
       descartarTerminalAutomatico(t);
       normalizarAba(t);
       adotarExistentes().then(() => { registrarAbertas(); recarregar(false); });
@@ -1111,11 +1123,9 @@ function activate(context) {
     if (e.affectsConfiguration('gabTerminais.persistenciaNativa')) ajustarPersistenciaNativa();
   }));
   for (const t of vscode.window.terminals) descartarTerminalAutomatico(t);
-  // Abas antigas do + (de antes desta versao) viram gab-attach depois da abertura.
-  const normalizarTodas = setTimeout(() => {
-    for (const t of vscode.window.terminals) normalizarAba(t);
-  }, 65000);
-  context.subscriptions.push({ dispose: () => clearTimeout(normalizarTodas) });
+  // Nao ha mais a passada "normalizar todas" 65 s depois de abrir: ela pegava
+  // as abas recriadas pelo VS Code (na ordem certa) e as recriava em paralelo,
+  // e a ordem das abas voltava embaralhada a cada reabertura.
 
   // Com a persistencia nativa o VS Code recria as abas logo ao abrir; da um
   // instante para elas aparecerem antes de decidir o que falta reabrir.
