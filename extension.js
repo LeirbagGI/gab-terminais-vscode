@@ -384,21 +384,31 @@ function registrarAbertas(encolher = false) {
     // descartadas de uma vez: se isso virasse registro, o proximo login abriria
     // nada e o trabalho pareceria perdido.
     if (!lista.length || encerrando) return;
+    // A ORDEM da lista e a ordem em que as abas voltam. Nada de ordem
+    // alfabetica (ate a 1.7.3): quem ja estava na lista fica no seu lugar e
+    // aba nova entra no fim, como a pessoa foi abrindo.
+    const salvas = abertasSalvas();
+    let existem = null;
     if (!encolherAgora) {
       const r = await rodar(tmuxBin(), ['list-sessions', '-F', '#{session_name}']);
-      const existem = new Set(r.saida.split('\n').filter(Boolean));
-      for (const x of abertasSalvas()) {
-        if (!existem.has(nomeDe(x)) || vistas.has(nomeDe(x))) continue;
-        vistas.add(nomeDe(x));
-        lista.push(x);
-      }
+      existem = new Set(r.saida.split('\n').filter(Boolean));
     }
-    const antes = JSON.stringify(abertasSalvas());
-    lista.sort((a, b) => nomeDe(a).localeCompare(nomeDe(b)));
+    const final = [];
+    const postas = new Set();
+    for (const x of salvas) {
+      const n = nomeDe(x);
+      if (postas.has(n)) continue;
+      if (vistas.has(n)) final.push(n);
+      else if (existem && existem.has(n)) final.push(x);
+      else continue;
+      postas.add(n);
+    }
+    for (const s of lista) if (!postas.has(s)) { final.push(s); postas.add(s); }
+    const antes = JSON.stringify(salvas);
     try {
-      if (JSON.stringify(lista) === antes) return;
+      if (JSON.stringify(final) === antes) return;
       const tmp = ARQ_ABERTAS + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(lista, null, 2));
+      fs.writeFileSync(tmp, JSON.stringify(final, null, 2));
       fs.renameSync(tmp, ARQ_ABERTAS);
     } catch (e) { /* sem registro e melhor do que quebrar a janela */ }
   }, 2500);
