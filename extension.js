@@ -289,6 +289,29 @@ async function adotarExistentes() {
 
 function vivo(t) { return t && t.exitStatus === undefined; }
 
+// Ambiente da aba, montado a mao (strictEnv). Sem isso o VS Code injeta nas
+// abas as variaveis do Claude Code (CLAUDE_CODE_SSE_PORT, porta nova a cada
+// reinicio de extensoes), do Copilot e do Git — e, quando elas mudam, pinta o
+// nome de TODAS as abas de amarelo com um ⚠ ("relaunch needed"). Nas abas do
+// tmux essas variaveis nem servem: o tmux nao as repassa para as sessoes.
+// Tentativa anterior (1.7.2, nunca publicada): dar "relaunch" nas abas. Deu
+// errado — nas abas recriadas pelo VS Code o relaunch abre um terminal novo
+// em vez de voltar para a sessao.
+function ambienteDaAba() {
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (/^(VSCODE_|ELECTRON_|APPLICATIONINSIGHTS|COPILOT_|CLAUDE_CODE_)/.test(k)) continue;
+    if (['GIT_ASKPASS', 'NODE_OPTIONS', 'CLAUDECODE'].includes(k)) continue;
+    env[k] = v;
+  }
+  env.TERM = 'xterm-256color';
+  env.COLORTERM = 'truecolor';
+  env.TERM_PROGRAM = 'vscode';
+  env.TERM_PROGRAM_VERSION = vscode.version;
+  if (!/UTF-8/i.test(env.LANG || '')) env.LANG = 'C.UTF-8';
+  return env;
+}
+
 function abrir(nome, cor, focar, rotulo) {
   let t = abertos.get(nome);
   if (!vivo(t)) {
@@ -305,6 +328,8 @@ function abrir(nome, cor, focar, rotulo) {
       name: ap.nome || rotulo || nome,
       shellPath: bin('gab-attach'),
       shellArgs: [nome],
+      env: ambienteDaAba(),
+      strictEnv: true,
       iconPath: new vscode.ThemeIcon(ap.icone),
       color: c && c !== 'nenhuma' ? new vscode.ThemeColor(c) : undefined,
     });
