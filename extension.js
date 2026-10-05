@@ -33,6 +33,7 @@ const ARQ_WORKSPACE = path.join(HOME, '.gab-terminais-workspace');
 const ARQ_ABERTAS = path.join(HOME, '.gab-terminais-abertas.json');
 const ARQ_APARENCIA = path.join(HOME, '.gab-terminais-aparencia.json');
 const ARQ_ICONES = path.join(HOME, '.gab-terminais-icones.json');
+const ARQ_CRIACAO = path.join(HOME, '.gab-terminais-criacao.json');
 const PERFIL = 'tmux (persistente)';   // nome das abas criadas pelo botao +
 const ARQ_ATIVA = path.join(HOME, '.gab-terminais-ativa');
 const ARQ_LOG = path.join(HOME, 'Library', 'Logs', 'gab-terminais-extensao.log');
@@ -186,6 +187,35 @@ async function sessoesVivas() {
     });
   }
   return out;
+}
+
+// Data em que cada terminal foi aberto pela primeira vez — e a ordem das abas.
+// O #{session_created} do tmux sozinho nao serve: depois de um reboot o
+// gab-terminais-restore recria as sessoes e todas ganham a hora do boot. Por
+// isso a data e gravada na primeira vez que a sessao aparece e so pode recuar.
+async function datasDeCriacao() {
+  const r = await rodar(tmuxBin(), ['list-sessions', '-F', '#{session_name}\t#{session_created}']);
+  const datas = lerJSON(ARQ_CRIACAO) || {};
+  let mudou = false;
+  for (const linha of r.saida.split('\n')) {
+    const i = linha.indexOf('\t');
+    if (i < 0) continue;
+    const nome = linha.slice(0, i);
+    const ms = Number(linha.slice(i + 1)) * 1000;
+    if (ms && !(datas[nome] <= ms)) { datas[nome] = ms; mudou = true; }
+  }
+  if (mudou) gravarJSON(ARQ_CRIACAO, datas);
+  return datas;
+}
+
+// Ordena pela data de abertura; empate (sessoes recriadas no mesmo boot antes
+// de existir o registro) fica na ordem em que ja estava.
+async function porData(lista) {
+  const datas = await datasDeCriacao();
+  const d = (x) => datas[nomeDe(x)] || Infinity;
+  return lista.map((x, i) => [x, i])
+    .sort((a, b) => (d(a[0]) - d(b[0])) || (a[1] - b[1]))
+    .map((p) => p[0]);
 }
 
 // Quem VIRA ABA — decidido pelo gab-terminais-sync, nunca aqui.
@@ -384,16 +414,15 @@ function registrarAbertas(encolher = false) {
     // descartadas de uma vez: se isso virasse registro, o proximo login abriria
     // nada e o trabalho pareceria perdido.
     if (!lista.length || encerrando) return;
-    // A ORDEM da lista e a ordem em que as abas voltam. Nada de ordem
-    // alfabetica (ate a 1.7.3): quem ja estava na lista fica no seu lugar e
-    // aba nova entra no fim, como a pessoa foi abrindo.
+    // A ORDEM da lista e a ordem em que as abas voltam: a data em que cada
+    // terminal foi aberto (ate a 1.7.3 era alfabetica, e a pessoa se perdia).
     const salvas = abertasSalvas();
     let existem = null;
     if (!encolherAgora) {
       const r = await rodar(tmuxBin(), ['list-sessions', '-F', '#{session_name}']);
       existem = new Set(r.saida.split('\n').filter(Boolean));
     }
-    const final = [];
+    let final = [];
     const postas = new Set();
     for (const x of salvas) {
       const n = nomeDe(x);
@@ -404,6 +433,7 @@ function registrarAbertas(encolher = false) {
       postas.add(n);
     }
     for (const s of lista) if (!postas.has(s)) { final.push(s); postas.add(s); }
+    final = await porData(final);
     const antes = JSON.stringify(salvas);
     try {
       if (JSON.stringify(final) === antes) return;
@@ -431,7 +461,7 @@ function abertasSalvas() {
 
 // Reabre exatamente o que estava aberto, e so o que ainda existe no tmux.
 async function reabrirAbertas() {
-  const querendo = abertasSalvas();
+  const querendo = await porData(abertasSalvas());
   if (!querendo.length) return { criados: 0, total: 0 };
   const vivas = new Set((await sessoesVivas()).map((s) => s.nome));
   await adotarExistentes();
@@ -456,6 +486,42 @@ async function reabrirAbertas() {
     criados++;
   }
   return { criados, total: querendo.length };
+}
+
+// Poe as abas tmux na ordem em que os terminais foram abertos (mais antigo
+// primeiro). O VS Code recria as abas na ordem em que estavam na tela e nao ha
+// API para mover uma aba; o unico jeito e recriar, no fim, cada aba a partir da
+// primeira fora do lugar. UMA POR VEZ e em sequencia: recriar em paralelo (ate
+// a 1.7.2) fazia a ordem depender de qual tmux respondia primeiro.
+// O icone, a cor e o nome voltam do ~/.gab-terminais-aparencia.json.
+async function organizarPorData() {
+  const clientes = await clientesTmux();
+  const atual = [];
+  for (const t of vscode.window.terminals) {
+    if (!vivo(t)) continue;
+    const s = await sessaoDaAba(t, clientes);
+    if (s && !atual.some((a) => a.sessao === s)) atual.push({ sessao: s, t });
+  }
+  const certa = await porData(atual.map((a) => a.sessao));
+  let i = 0;
+  while (i < atual.length && atual[i].sessao === certa[i]) i++;
+  if (i >= atual.length) return 0;
+  const ativa = vscode.window.activeTerminal;
+  let focar = null;
+  for (const nome of certa.slice(i)) {
+    const velha = atual.find((a) => a.sessao === nome).t;
+    if (velha.name && velha.name !== PERFIL && velha.name !== nome && !aparenciaDe(nome).nome) {
+      mudarAparencia(nome, { nome: velha.name });
+    }
+    abertos.delete(nome);
+    velha.dispose();
+    await esperar(150);   // o tmux solta o cliente antigo antes do novo entrar
+    const nova = abrir(nome, null, false);
+    if (velha === ativa) focar = nova;
+  }
+  if (focar) focar.show(false);
+  log(`abas organizadas por data: ${certa.length - i} recriada(s) a partir de ${certa[i]}`);
+  return certa.length - i;
 }
 
 // No login o tmux pode estar recriando as sessoes enquanto a extensao sobe.
@@ -491,6 +557,9 @@ async function restaurarNoLogin() {
       await new Promise((r) => setTimeout(r, 5000));
     }
   } finally {
+    if (conf('ordenarPorData', true)) {
+      try { await organizarPorData(); } catch (e) { log(`organizar por data falhou: ${e.message}`); }
+    }
     restaurando = false;
     log(`restauracao terminou: ${[...abertos.values()].filter(vivo).length} aba(s) tmux abertas`);
     mostrarAbaAtiva();
@@ -988,6 +1057,21 @@ function activate(context) {
     vscode.window.showInformationMessage(
       `Terminais tmux: ${r.criados} aba(s) reaberta(s) de ${r.total} que estavam abertas.`,
     );
+    recarregar(true);
+  });
+
+  cmd('gabTerminais.organizarPorData', async () => {
+    // Enquanto as abas sao recriadas, nada e gravado (senao o fechamento da
+    // aba velha poderia encolher a lista).
+    restaurando = true;
+    let n = 0;
+    try { n = await organizarPorData(); } finally {
+      restaurando = false;
+      registrarAbertas();
+    }
+    vscode.window.showInformationMessage(n
+      ? `Terminais tmux: abas organizadas pela data em que foram abertas (${n} recriada(s)).`
+      : 'Terminais tmux: as abas ja estao na ordem em que foram abertas.');
     recarregar(true);
   });
 

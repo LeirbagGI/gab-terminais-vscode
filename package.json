@@ -2,7 +2,7 @@
   "name": "gab-terminais",
   "displayName": "Terminal (GAB)",
   "description": "Guarda os terminais criados: cada aba do VS Code e uma sessao tmux persistente, listada e reaberta sem Reload Window.",
-  "version": "1.7.4",
+  "version": "1.7.5",
   "publisher": "gab",
   "license": "MIT",
   "icon": "icon.png",
@@ -91,6 +91,12 @@
         "command": "gabTerminais.verificarInstalacao",
         "title": "Verificar / reparar a instalacao neste computador",
         "category": "Terminais tmux"
+      },
+      {
+        "command": "gabTerminais.organizarPorData",
+        "title": "Organizar abas pela data em que foram abertas",
+        "category": "Terminais tmux",
+        "icon": "$(list-ordered)"
       }
     ],
     "menus": {
@@ -104,6 +110,11 @@
           "command": "gabTerminais.atualizar",
           "when": "view == gabTerminais.lista",
           "group": "navigation@2"
+        },
+        {
+          "command": "gabTerminais.organizarPorData",
+          "when": "view == gabTerminais.lista",
+          "group": "navigation@3"
         }
       ],
       "view/item/context": [
@@ -164,6 +175,11 @@
           "type": "boolean",
           "default": true,
           "description": "Usar a persistencia do proprio VS Code para guardar icone, cor e nome escolhidos no menu nativo da aba. Desligue se aparecerem abas duplicadas."
+        },
+        "gabTerminais.ordenarPorData": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ao abrir o VS Code, poe as abas na ordem em que os terminais foram abertos (o mais antigo primeiro)."
         }
       }
     }
