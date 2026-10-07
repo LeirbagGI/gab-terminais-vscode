@@ -1,0 +1,36 @@
+#!/bin/bash
+# Abre (ou reconecta) uma sessao tmux persistente.
+# A sessao continua viva mesmo com o VS Code fechado.
+S="$1"
+[ -z "$S" ] && { echo "uso: gab-attach NOME"; exit 1; }
+
+# O VS Code invoca o perfil padrao como `shell -c "comando"`. Se "-c" chegar
+# aqui como nome, algo a montante esta errado (era a origem da sessao "-c").
+case "$S" in
+  -*) echo "gab-attach: nome invalido '$S' (nao pode comecar com '-')"; exit 1 ;;
+esac
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/bin:$PATH"
+printf '\033]0;%s\007' "$S"
+
+if ! command -v tmux >/dev/null 2>&1; then
+  echo "tmux nao encontrado - abrindo shell normal."
+  exec "$SHELL"
+fi
+
+# Sessao que nao existe mas esta no manifesto: o VS Code recriou esta aba
+# (persistencia nativa) antes de o tmux restaurar a sessao, tipicamente logo
+# depois de reiniciar o Mac. Restaura ESTA sessao aqui, com historico e
+# programa, em vez de criar uma vazia com o mesmo nome.
+if ! tmux has-session -t "=$S" 2>/dev/null && [ -x "$HOME/bin/gab-terminais-restore" ]; then
+  "$HOME/bin/gab-terminais-restore" --so "$S" >>"$HOME/Library/Logs/gab-terminais.log" 2>&1
+fi
+
+# -A: cria a sessao se nao existir, senao apenas conecta.
+# -D: desconecta qualquer outro cliente antes de conectar este.
+#
+# O -D e o que impede o espelhamento: sem ele, duas abas na mesma sessao viram
+# dois paineis identicos. Com ele, a aba mais nova ASSUME a sessao e as antigas
+# (inclusive processos orfaos que o ptyHost do VS Code mantem vivos entre
+# reloads) saem sozinhas. Nunca recusa abrir.
+exec tmux new-session -A -D -s "$S" -c "${2:-$HOME}"

@@ -57,15 +57,28 @@ function log(msg) {
 // comando da extensao ("Mudar icone e cor"), que grava aqui. O nome e gravado
 // sozinho quando a aba e renomeada. Chave = sessao tmux, entao vale mesmo com a
 // aba fechada e depois de reboot.
+// Le o JSON; se o arquivo voltar vazio ou cortado (Mac travou), usa o .anterior.
+// Era assim que as abas voltavam como "terminal-N": o aparencia.json, onde
+// mora o nome de cada aba, ficava vazio depois do travamento.
 function lerJSON(arq) {
-  try { return JSON.parse(fs.readFileSync(arq, 'utf8')) || {}; } catch (e) { return {}; }
+  for (const a of [arq, `${arq}.anterior`]) {
+    try {
+      const d = JSON.parse(fs.readFileSync(a, 'utf8'));
+      if (d && Object.keys(d).length) return d;
+    } catch (e) { /* tenta a copia */ }
+  }
+  return {};
 }
 
 function gravarJSON(arq, dados) {
   try {
-    const tmp = `${arq}.tmp.${process.pid}`;
-    fs.writeFileSync(tmp, JSON.stringify(dados, null, 2));
-    fs.renameSync(tmp, arq);
+    const texto = JSON.stringify(dados, null, 2);
+    let velho = '';
+    try { velho = fs.readFileSync(arq, 'utf8'); } catch (e) { /* primeira vez */ }
+    if (velho.trim().length > 2 && (velho !== texto || !fs.existsSync(`${arq}.anterior`))) {
+      gravarSeguro(`${arq}.anterior`, velho);
+    }
+    gravarSeguro(arq, texto);
   } catch (e) { /* sem registro e melhor do que quebrar a janela */ }
 }
 
@@ -766,7 +779,7 @@ const REPO = 'LeirbagGI/gab-terminais-vscode';
 // Por isso ela confere as pecas e, faltando alguma, oferece rodar o instalador
 // mais recente do GitHub. Subir VERSAO_SCRIPTS e o jeito de levar scripts
 // novos aos outros computadores.
-const VERSAO_SCRIPTS = 4;
+const VERSAO_SCRIPTS = 5;
 const ARQ_VERSAO = path.join(HOME, '.gab-terminais-versao');
 const URL_INSTALADOR = `https://github.com/${REPO}/releases/latest/download/Terminais-tmux-instalador.zip`;
 

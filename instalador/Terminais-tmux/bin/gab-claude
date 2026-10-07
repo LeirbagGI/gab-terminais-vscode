@@ -1,0 +1,10 @@
+#!/bin/bash
+# Abre o Claude Code retomando a conversa desta pasta, se existir.
+# E este comando que o tmux-resurrect relanca depois de um reboot.
+DIR=$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')
+HIST="$HOME/.claude/projects/$DIR"
+if compgen -G "$HIST/*.jsonl" >/dev/null 2>&1; then
+  echo "→ retomando conversa anterior desta pasta..."
+  exec claude --continue "$@"
+fi
+exec claude "$@"

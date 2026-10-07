@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+# Recria as sessoes tmux salvas em ~/.gab-terminais.json.
+# Chamado pelo LaunchAgent no login (depois de reiniciar o Mac).
+import json, os, subprocess, sys, time, re
+
+HOME = os.path.expanduser("~")
+
+
+def gravar_seguro(caminho, texto):
+    """Grava sem risco de arquivo vazio num travamento: escreve num .tmp, forca
+    o disco (fsync) e so entao troca. A versao boa anterior fica em
+    <arquivo>.anterior, que os leitores usam se o principal vier estragado."""
+    tmp = f"{caminho}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        f.write(texto)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        with open(caminho) as f:
+            velho = f.read()
+        ant = f"{caminho}.anterior"
+        if len(velho.strip()) > 2 and (velho != texto or not os.path.exists(ant)):
+            with open(ant + ".tmp", "w") as f:
+                f.write(velho)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(ant + ".tmp", ant)
+    except OSError:
+        pass
+    os.replace(tmp, caminho)
+
+def ler_json_seguro(caminho, padrao):
+    """Le o JSON; se o arquivo estiver vazio ou cortado, usa o .anterior."""
+    for c in (caminho, caminho + ".anterior"):
+        try:
+            with open(c) as f:
+                d = json.load(f)
+            if d:
+                return d
+        except (OSError, ValueError):
+            pass
+    return padrao
+MANIFESTO = os.path.join(HOME, ".gab-terminais.json")
+TMUX = None
+for b in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", os.path.expanduser("~/bin/tmux"), "/opt/local/bin/tmux"):
+    if os.access(b, os.X_OK):
+        TMUX = b
+        break
+
+
+TELAS = os.path.join(HOME, ".gab-terminais-telas")
+
+def slug(nome):
+    import re
+    return re.sub(r"[^A-Za-z0-9]+", "_", nome).strip("_") or "sem_nome"
+
+def boot_script(nome, cwd):
+    """Gera o script que devolve a tela salva e relanca o programa que rodava."""
+    import shlex
+    s = slug(nome)
+    hist = os.path.join(TELAS, s + ".txt")
+    cmd = ""
+    cmd = ler_json_seguro(os.path.join(TELAS, "programas.json"), {}).get(nome, "") or ""
+    # Claude Code volta retomando A CONVERSA DAQUELA SESSAO.
+    # "claude --continue" retomaria a conversa mais recente da PASTA, e como
+    # quase todas as sessoes compartilham a mesma pasta, todas voltariam
+    # mostrando a mesma conversa. O mapa (gab-conversas-mapear) guarda o id
+    # certo de cada uma. Sem mapa, abre uma conversa nova (gab-claude-novo).
+    if cmd.split(" ")[0].endswith("claude"):
+        conversa = ""
+        conversa = ler_json_seguro(os.path.join(HOME, ".gab-terminais-conversas.json"), {}).get(nome, "")
+        if re.fullmatch(r"[0-9a-fA-F-]{36}", conversa or ""):
+            cmd = f"claude --resume {conversa}"
+        else:
+            # Sem id mapeado a sessao ainda nao trocou mensagem nenhuma: nao ha
+            # o que retomar. gab-claude faria "claude --continue", e como quase
+            # todas as sessoes compartilham a pasta, VARIAS voltariam na mesma
+            # conversa - o proprio problema que o mapa existe para evitar.
+            cmd = f"{HOME}/bin/gab-claude-novo"
+
+    os.makedirs(TELAS, exist_ok=True)
+    caminho = os.path.join(TELAS, s + ".boot.zsh")
+    with open(caminho, "w") as f:
+        f.write("#!/bin/zsh\n")
+        if os.path.isfile(hist) and os.path.getsize(hist) > 1:
+            f.write(f"cat {shlex.quote(hist)} 2>/dev/null\n")
+            f.write('print -P "%F{240}──────── histórico restaurado ────────%f"\n')
+        if cmd:
+            f.write(f'print -P "%F{{240}}relançando:%f {cmd}"\n')
+            f.write(cmd + "\n")
+        f.write("exec zsh -i\n")
+    os.chmod(caminho, 0o755)
+    return caminho
+
+def log(msg):
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+if not TMUX:
+    log("tmux nao encontrado - nada a fazer.")
+    sys.exit(0)
+if not os.path.exists(MANIFESTO) and not os.path.exists(MANIFESTO + ".anterior"):
+    log("sem manifesto - nada a restaurar.")
+    sys.exit(0)
+
+itens = ler_json_seguro(MANIFESTO, [])
+
+# --so NOME: restaura so essa sessao, na hora e sem esperar o Drive. E o que o
+# gab-attach chama quando o VS Code recria uma aba (persistencia nativa) antes
+# de o LaunchAgent restaurar a sessao: sem isto nasceria uma sessao VAZIA com
+# o mesmo nome, e o restore depois a pularia por "ja existir".
+SO = sys.argv[sys.argv.index("--so") + 1] if "--so" in sys.argv[:-1] else None
+if SO is not None:
+    itens = [i for i in itens if i["nome"] == SO]
+    if not itens:
+        sys.exit(0)
+if not itens:
+    log("manifesto vazio.")
+    sys.exit(0)
+
+# O Google Drive monta depois do login. Espera ate 3 min pelas pastas.
+WORKSPACE = ""
+try:
+    with open(os.path.join(HOME, ".gab-terminais-workspace")) as f:
+        WORKSPACE = f.read().strip()
+except OSError:
+    pass
+
+prazo = time.time() + 300
+def faltando():
+    f = [i["cwd"] for i in itens if not os.path.isdir(i["cwd"])]
+    # O tasks.json vive no workspace: sem ele montado o VS Code abre sem as abas.
+    if WORKSPACE and not os.path.isdir(WORKSPACE):
+        f.append(WORKSPACE)
+    return f
+while SO is None and faltando() and time.time() < prazo:
+    log(f"esperando {len(faltando())} pasta(s) montar (Google Drive)...")
+    time.sleep(10)
+
+criadas, puladas = [], []
+for i in itens:
+    nome, cwd = i["nome"], i["cwd"]
+    if subprocess.run([TMUX, "has-session", "-t", f"={nome}"],
+                      capture_output=True).returncode == 0:
+        puladas.append(nome)
+        continue
+    if not os.path.isdir(cwd):
+        cwd = HOME
+        log(f"pasta de '{nome}' nao montou; abrindo em {HOME}")
+    r = subprocess.run([TMUX, "new-session", "-d", "-s", nome, "-c", cwd,
+                        boot_script(nome, cwd)], capture_output=True, text=True)
+    (criadas if r.returncode == 0 else puladas).append(nome)
+    if r.returncode != 0:
+        log(f"falhou '{nome}': {r.stderr.strip()}")
+
+log(f"criadas: {criadas or '-'} | ja existiam: {puladas or '-'}")
+
+
+# ---------------------------------------------------------------------------
+# Corrida do login: o macOS reabre o VS Code antes do Google Drive montar.
+# Sem o Drive nao existe .vscode/tasks.json para ele ler, a task folderOpen
+# nao roda e nenhuma aba abre - mesmo com as sessoes tmux vivas. A cura e
+# reabrir o VS Code depois que a pasta monta.
+#
+# So a execucao do LaunchAgent no login (--login) pode mexer no editor.
+# Rodar o script a mao NUNCA fecha o VS Code de ninguem.
+# ---------------------------------------------------------------------------
+
+LOGIN = "--login" in sys.argv
+
+def tmux_out(*a):
+    return subprocess.run([TMUX, *a], capture_output=True, text=True).stdout
+
+def vscode_rodando():
+    return subprocess.run(["pgrep", "-x", "Code"], capture_output=True).returncode == 0
+
+def abas_abertas():
+    """Alguma sessao salva ja tem cliente? Entao as tasks rodaram: nada a fazer."""
+    clientes = set(filter(None, tmux_out("list-clients", "-F", "#{client_session}").split("\n")))
+    return bool({i["nome"] for i in itens} & clientes)
+
+def esperar(cond, prazo_s, passo=2):
+    fim = time.time() + prazo_s
+    while time.time() < fim:
+        if cond():
+            return True
+        time.sleep(passo)
+    return cond()
+
+if not LOGIN:
+    log("execucao manual - VS Code intocado.")
+elif not WORKSPACE or not os.path.isdir(WORKSPACE):
+    log("workspace nao montou - VS Code intocado.")
+else:
+    # O macOS pode demorar para reabrir o VS Code. Espera antes de abrir por
+    # conta propria, senao nascem duas janelas da mesma pasta.
+    if not esperar(vscode_rodando, 90):
+        log("VS Code nao subiu sozinho - abrindo no workspace.")
+        subprocess.run(["open", "-a", "Visual Studio Code", WORKSPACE])
+    # Ele pode estar subindo agora e as abas conectarem em alguns segundos.
+    # Sem esta folga o script fecharia o editor justo quando ia funcionar.
+    elif esperar(abas_abertas, 60):
+        log("abas conectaram sozinhas - nada a fazer.")
+    else:
+        log("VS Code subiu sem as abas (Drive montou depois). Reabrindo...")
+        subprocess.run(["osascript", "-e",
+                        'tell application "Visual Studio Code" to quit'],
+                       capture_output=True)
+        if esperar(lambda: not vscode_rodando(), 30, passo=1):
+            subprocess.run(["open", "-a", "Visual Studio Code", WORKSPACE])
+            log("VS Code reaberto no workspace.")
+        else:
+            log("VS Code nao encerrou; abortando reabertura.")

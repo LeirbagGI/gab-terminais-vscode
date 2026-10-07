@@ -1,0 +1,4 @@
+#!/bin/bash
+# Renomeia a sessao tmux atual (o nome vira o nome da aba na proxima abertura).
+[ -z "$1" ] && { echo "uso: gab-nome NOVO NOME"; exit 1; }
+tmux rename-session "$*" && printf '\033]0;%s\007' "$*" && echo "Renomeado para: $*"

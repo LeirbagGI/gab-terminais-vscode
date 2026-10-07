@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+# Descobre em QUAL conversa do Claude Code cada sessao tmux esta, e grava o mapa
+# em ~/.gab-terminais-conversas.json  (sessao tmux -> id da conversa).
+#
+# Por que existe: as sessoes tmux morrem no reboot. O restore as recria e
+# relanca o claude — mas com "claude --continue", que retoma a conversa mais
+# recente DAQUELA PASTA. Como quase todas as sessoes tem a mesma pasta, todas
+# voltariam mostrando a MESMA conversa. Com este mapa, cada uma volta na sua.
+#
+# Roda sozinho junto do snapshot de telas (a cada 5 min e ao fechar aba).
+
+import glob, json, os, re, subprocess
+
+HOME = os.path.expanduser("~")
+
+
+def gravar_seguro(caminho, texto):
+    """Grava sem risco de arquivo vazio num travamento: escreve num .tmp, forca
+    o disco (fsync) e so entao troca. A versao boa anterior fica em
+    <arquivo>.anterior, que os leitores usam se o principal vier estragado."""
+    tmp = f"{caminho}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        f.write(texto)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        with open(caminho) as f:
+            velho = f.read()
+        ant = f"{caminho}.anterior"
+        if len(velho.strip()) > 2 and (velho != texto or not os.path.exists(ant)):
+            with open(ant + ".tmp", "w") as f:
+                f.write(velho)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(ant + ".tmp", ant)
+    except OSError:
+        pass
+    os.replace(tmp, caminho)
+
+def ler_json_seguro(caminho, padrao):
+    """Le o JSON; se o arquivo estiver vazio ou cortado, usa o .anterior."""
+    for c in (caminho, caminho + ".anterior"):
+        try:
+            with open(c) as f:
+                d = json.load(f)
+            if d:
+                return d
+        except (OSError, ValueError):
+            pass
+    return padrao
+DEST = os.path.join(HOME, ".gab-terminais-conversas.json")
+TMUX = next((b for b in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", os.path.expanduser("~/bin/tmux"), "/opt/local/bin/tmux")
+             if os.access(b, os.X_OK)), None)
+if not TMUX:
+    raise SystemExit(0)
+
+def t(*a):
+    try:
+        return subprocess.run([TMUX, *a], capture_output=True, text=True,
+                              timeout=10).stdout
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+
+def norm(s):
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+# 1) indice das conversas: id -> (mtime, texto inteiro)
+conversas = {}
+for f in glob.glob(os.path.join(HOME, ".claude/projects/*/*.jsonl")):
+    partes = []
+    try:
+        for linha in open(f, errors="ignore"):
+            try:
+                d = json.loads(linha)
+            except ValueError:
+                continue
+            m = d.get("message", {}).get("content")
+            if isinstance(m, str):
+                partes.append(m)
+            elif isinstance(m, list):
+                for p in m:
+                    if isinstance(p, dict) and p.get("type") == "text":
+                        partes.append(p["text"])
+    except OSError:
+        continue
+    if partes:
+        conversas[os.path.basename(f)[:-6]] = (os.path.getmtime(f),
+                                               norm(" ".join(partes)))
+
+# 2) casa a tela de cada sessao com a conversa que a contem
+sessoes = list(dict.fromkeys(
+    l for l in t("list-panes", "-a", "-F", "#{session_name}").split("\n") if l.strip()))
+
+mapa = {}
+for s in sessoes:
+    tela = t("capture-pane", "-p", "-S", "-500", "-t", s)
+    # frases longas o bastante para serem unicas; sem os enfeites da interface
+    frases = [norm(re.sub(r"^[⏺✻※❯⎿│─╭╰\s]+", "", l))[:60] for l in tela.split("\n")]
+    frases = [f for f in frases if len(f) >= 30]
+    if not frases:
+        continue
+    pontos = {}
+    for sid, (mt, txt) in conversas.items():
+        n = sum(1 for f in frases if f in txt)
+        if n:
+            pontos[sid] = (n, mt)
+    if pontos:
+        # mais trechos em comum vence; empate vai para a conversa mais recente
+        mapa[s] = max(pontos.items(), key=lambda kv: (kv[1][0], kv[1][1]))[0]
+
+# 3) nunca apagar um mapeamento por uma leitura ruim (tela em branco, sessao
+#    ocupada). Sessao que sumiu de vez sai; as demais preservam o valor antigo.
+antigo = ler_json_seguro(DEST, {})
+vivas = set(sessoes)
+for s, sid in antigo.items():
+    if s in vivas and s not in mapa:
+        mapa[s] = sid
+
+gravar_seguro(DEST, json.dumps(mapa, indent=2, ensure_ascii=False))
+print(f"{len(mapa)} sessao(oes) mapeada(s) para sua conversa")

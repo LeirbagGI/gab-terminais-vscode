@@ -1,0 +1,29 @@
+set -g mouse on
+set -g history-limit 100000
+set -g focus-events on
+set -sg escape-time 10
+
+# Nunca matar sessao sozinha
+set -g destroy-unattached off
+set -g detach-on-destroy off
+
+# Barra de baixo mostra o nome do terminal
+set -g status-style "bg=colour236,fg=colour252"
+set -g status-left "#[bold] #S #[default]"
+set -g status-left-length 40
+set -g status-right "#[fg=colour244] %H:%M "
+
+# Mantem a lista de terminais salva. O >/dev/null e obrigatorio: sem ele a
+# saida do comando aparece dentro do terminal aberto.
+set-hook -g session-created  'run-shell -b "$HOME/bin/gab-terminais-sync >/dev/null 2>&1"'
+set-hook -g session-closed   'run-shell -b "$HOME/bin/gab-terminais-sync >/dev/null 2>&1"'
+set-hook -g after-rename-session 'run-shell -b "$HOME/bin/gab-terminais-sync >/dev/null 2>&1"'
+set-hook -g client-detached  'run-shell -b "$HOME/bin/gab-terminais-sync >/dev/null 2>&1"'
+# -ga (acrescenta): sem o "a" este substituiria o hook de cima.
+set-hook -ga client-detached 'run-shell -b "$HOME/bin/gab-terminais-salvar >/dev/null 2>&1"'
+
+# Rolar a tela nao deixa o terminal "travado": clicar ou rolar ate o fim sai sozinho.
+bind -T copy-mode    MouseUp1Pane  send-keys -X cancel
+bind -T copy-mode-vi MouseUp1Pane  send-keys -X cancel
+bind -T copy-mode    WheelDownPane send-keys -X -N 3 scroll-down-and-cancel
+bind -T copy-mode-vi WheelDownPane send-keys -X -N 3 scroll-down-and-cancel

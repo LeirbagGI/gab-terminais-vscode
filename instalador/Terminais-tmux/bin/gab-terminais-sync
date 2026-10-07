@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+# Regrava .vscode/tasks.json com uma aba por sessao tmux viva.
+# Vira aba: toda sessao de nome proprio, e as automaticas que tenham algo
+# dentro. Terminal-N recem-criado e vazio nao entra - senao a lista dobra a
+# cada abertura do VS Code.
+# Chamado automaticamente por hooks do tmux quando sessoes nascem/morrem/mudam de nome.
+import json, os, re, subprocess, sys
+
+HOME = os.path.expanduser("~")
+
+
+def gravar_seguro(caminho, texto):
+    """Grava sem risco de arquivo vazio num travamento: escreve num .tmp, forca
+    o disco (fsync) e so entao troca. A versao boa anterior fica em
+    <arquivo>.anterior, que os leitores usam se o principal vier estragado."""
+    tmp = f"{caminho}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        f.write(texto)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        with open(caminho) as f:
+            velho = f.read()
+        ant = f"{caminho}.anterior"
+        if len(velho.strip()) > 2 and (velho != texto or not os.path.exists(ant)):
+            with open(ant + ".tmp", "w") as f:
+                f.write(velho)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(ant + ".tmp", ant)
+    except OSError:
+        pass
+    os.replace(tmp, caminho)
+
+def ler_json_seguro(caminho, padrao):
+    """Le o JSON; se o arquivo estiver vazio ou cortado, usa o .anterior."""
+    for c in (caminho, caminho + ".anterior"):
+        try:
+            with open(c) as f:
+                d = json.load(f)
+            if d:
+                return d
+        except (OSError, ValueError):
+            pass
+    return padrao
+
+# Pasta do workspace do VS Code onde o tasks.json e mantido.
+# Configuravel para o mesmo script rodar em qualquer maquina:
+#   1) variavel de ambiente GAB_WORKSPACE
+#   2) arquivo ~/.gab-terminais-workspace  (escrito pelo instalador)
+WS = os.environ.get("GAB_WORKSPACE", "").strip()
+if not WS:
+    try:
+        with open(os.path.join(HOME, ".gab-terminais-workspace")) as f:
+            WS = f.read().strip()
+    except OSError:
+        WS = ""
+# Sem workspace configurado o tasks.json simplesmente nao e gerado: quem abre
+# as abas e a extensao do VS Code. Manifesto e registro continuam funcionando.
+if WS and not os.path.isdir(WS):
+    WS = ""
+TASKS = os.path.join(WS, ".vscode", "tasks.json") if WS else ""
+CORES = ["terminal.ansiMagenta", "terminal.ansiRed", "terminal.ansiGreen",
+         "terminal.ansiBlue", "terminal.ansiYellow", "terminal.ansiCyan"]
+
+def tmux(*a):
+    for b in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", os.path.expanduser("~/bin/tmux"), "/opt/local/bin/tmux", "tmux"):
+        try:
+            return subprocess.run([b, *a], capture_output=True, text=True, timeout=5).stdout
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return ""
+
+# Um terminal de nome automatico so vira aba quando TEM ALGUMA COISA dentro.
+# Motivo: o VS Code cria um terminal-N novo a cada janela aberta. Se todo
+# terminal-N virasse aba, cada abertura acrescentaria uma aba que na abertura
+# seguinte reabre E ganha uma companheira nova - a lista dobra sozinha
+# ("duplicou tudo"). Filtrar por NOME resolvia isso, mas fazia sumir terminal
+# com trabalho dentro. Por isso o criterio e conteudo, nao nome.
+#
+# Tem conteudo se: ha programa rodando, ou ha scrollback, ou a tela tem texto.
+# Sessao com nome proprio nunca passa por aqui - nome e escolha deliberada.
+def tem_conteudo(sess, pane_pid):
+    # history_size NAO serve como sinal: um terminal recem-aberto e vazio ja
+    # marca 3 ou 4 linhas, e uma sessao com claude rodando marca 1 (redesenha
+    # a tela no lugar). Os sinais confiaveis sao programa filho e texto na tela.
+    try:
+        filhos = subprocess.run(["pgrep", "-P", pane_pid], capture_output=True,
+                                text=True, timeout=3).stdout.split()
+    except (subprocess.TimeoutExpired, OSError):
+        filhos = []
+    if filhos:
+        return True
+    # Sem o prefixo "=": capture-pane devolve vazio com ele, do mesmo jeito
+    # que o display -p. Tela vazia tem 1 linha (o prompt); com trabalho, 20+.
+    tela = tmux("capture-pane", "-p", "-t", sess)
+    return len([l for l in tela.split("\n") if l.strip()]) > 2
+
+# pane_pid e history_size de cada sessao, para o teste acima
+INFO = {}
+for l in tmux("list-panes", "-a", "-F",
+              "#{session_name}\t#{pane_pid}\t#{history_size}").split("\n"):
+    if l.count("\t") == 2:
+        n, pid, hist = l.split("\t")
+        INFO.setdefault(n, (pid, hist))
+
+raw = tmux("list-sessions", "-F", "#{session_name}\t#{session_path}")
+pares = []
+for linha in raw.split("\n"):
+    if not linha.strip():
+        continue
+    nome, _, cwd = linha.partition("\t")
+    if nome.startswith("__"):   # sessoes internas (ex: __boot__)
+        continue
+    if re.fullmatch(r"terminal-\d+", nome):
+        pid, _ = INFO.get(nome, ("0", "0"))
+        if not tem_conteudo(nome, pid):
+            continue
+    # Terminal com trabalho dentro vira aba, tenha nome proprio ou nao.
+    # Para tirar da lista de vez: gab-fechar NOME (ou exit dentro dele).
+    pares.append((nome, cwd or HOME))
+
+def ordem(par):
+    """Nomeados primeiro (em ordem alfabetica), automaticos depois (numerica).
+    Sem isto um terminal-10 apareceria antes de um terminal-9, e os descartaveis
+    se misturariam com os terminais de trabalho no topo da lista."""
+    nome = par[0]
+    m = re.fullmatch(r"terminal-(\d+)", nome)
+    return (1, int(m.group(1)), "") if m else (0, 0, nome.lower())
+
+pares.sort(key=ordem)
+sessions = [n for n, _ in pares]
+
+# --listar: devolve em JSON o que viraria aba, SEM escrever nada. E por aqui que
+# a extensao do VS Code le a lista. Existe para a regra da catraca (quem vira
+# aba) morar num lugar so: duplicar essa regra na extensao seria garantir que as
+# duas versoes divirjam na primeira vez que uma delas mudasse.
+if "--listar" in sys.argv:
+    try:
+        with open(os.path.join(HOME, ".gab-terminais-icones.json")) as f:
+            _ic = json.load(f)
+    except (OSError, ValueError):
+        _ic = {}
+    print(json.dumps([
+        {"nome": n, "cwd": c,
+         "icone": _ic.get(n, {"id": "terminal", "color": CORES[i % len(CORES)]})}
+        for i, (n, c) in enumerate(pares)
+    ], ensure_ascii=False))
+    sys.exit(0)
+
+# ---------------------------------------------------------------------------
+# Registro dos nomes escolhidos a mao (~/.gab-terminais-nomes.json).
+#
+# O manifesto abaixo so enxerga o que esta vivo agora. Sem este registro, uma
+# sessao nomeada que morra (crash, kill acidental, um -f sem querer) sumia do
+# manifesto no sync seguinte e o nome se perdia para sempre. Dar nome e um ato
+# deliberado: o nome sobrevive a sessao.
+#
+# Sai daqui apenas por decisao explicita: gab-fechar apaga o nome ao encerrar.
+# ---------------------------------------------------------------------------
+REG = os.path.join(HOME, ".gab-terminais-nomes.json")
+try:
+    with open(REG) as f:
+        registro = json.load(f)
+    if not isinstance(registro, dict):
+        registro = {}
+except (OSError, ValueError):
+    registro = {}
+
+vivos = dict(pares)
+
+# Reler o registro AGORA, na hora de gravar, e nao reaproveitar o que foi lido
+# la em cima. Entre as duas coisas cabe um gab-fechar inteiro: ele mata a
+# sessao (o que dispara ESTE sync pelo hook session-closed), apaga o nome do
+# registro e sai. Gravando o dicionario antigo por cima, o nome recem-apagado
+# ressuscitava e a sessao voltava no reboot seguinte - "fechei e voltou", que e
+# pior do que nao ter fechado. Como aqui so se ACRESCENTA nome vivo, reler e
+# mesclar preserva qualquer remocao feita nesse meio tempo.
+try:
+    with open(REG) as f:
+        registro = json.load(f)
+    if not isinstance(registro, dict):
+        registro = {}
+except (OSError, ValueError):
+    registro = {}
+for n, c in pares:
+    if not re.fullmatch(r"terminal-\d+", n):   # so nomes escolhidos a mao
+        registro[n] = c
+try:
+    # Gravacao atomica: dois syncs podem correr juntos (os hooks disparam de
+    # varios eventos), e um leitor nao pode encontrar o arquivo pela metade.
+    gravar_seguro(REG, json.dumps(registro, indent=2, ensure_ascii=False))
+except OSError:
+    pass
+
+# Manifesto lido pelo LaunchAgent para recriar as sessoes depois de um reboot.
+# Inclui os nomes do registro que nao estao vivos: sao eles que voltam depois
+# de um crash. NUNCA gravar manifesto vazio: no shutdown as sessoes morrem e os
+# hooks podem disparar: se deixassemos zerar, o reboot nao teria o que restaurar.
+manifesto = [{"nome": n, "cwd": c} for n, c in pares]
+manifesto += [{"nome": n, "cwd": c} for n, c in sorted(registro.items())
+              if n not in vivos]
+try:
+    if not manifesto:
+        raise OSError("lista vazia - preserva manifesto anterior")
+    gravar_seguro(os.path.join(HOME, ".gab-terminais.json"),
+                  json.dumps(manifesto, indent=2, ensure_ascii=False))
+except OSError:
+    pass
+
+if not TASKS:
+    print(f"{len(sessions)} terminal(is) salvos (sem tasks.json)")
+    raise SystemExit(0)
+
+# Icones escolhidos a mao ficam em ~/.gab-terminais-icones.json e sobrevivem a tudo.
+ICONES = {}
+try:
+    with open(os.path.join(HOME, ".gab-terminais-icones.json")) as f:
+        ICONES = json.load(f)
+except (OSError, ValueError):
+    pass
+
+tasks = []
+for i, s in enumerate(sessions):
+    tasks.append({
+        "label": s,
+        "type": "shell",
+        "command": f'"{HOME}/bin/gab-attach" {json.dumps(s)}',
+        "icon": ICONES.get(s, {"id": "terminal", "color": CORES[i % len(CORES)]}),
+        "isBackground": True,
+        "problemMatcher": [],
+        "presentation": {"echo": False, "reveal": "always", "panel": "dedicated",
+                         "clear": True},
+    })
+
+if tasks:
+    tasks.append({
+        "label": "Abrir meus terminais",
+        "dependsOn": [t["label"] for t in tasks],
+        "problemMatcher": [],
+        # A extensao do VS Code (gab-terminais) abre as abas por conta propria e
+        # em tempo real. Com ela ativa, o folderOpen faria o mesmo trabalho duas
+        # vezes e a lista nasceria duplicada. O arquivo-bandeira desliga so o
+        # gatilho: a task continua existindo para abrir tudo a mao quando quiser.
+        **({} if os.path.exists(os.path.join(HOME, ".gab-terminais-sem-folderopen"))
+           else {"runOptions": {"runOn": "folderOpen"}}),
+    })
+
+# Preserva tasks que nao sao nossas (build, testes, o que a pessoa ja tinha).
+# Sem isto o sync reescrevia o tasks.json inteiro e apagava tudo.
+# Nossas tasks se identificam por: comando chamando gab-attach, ou o agregador.
+def nossa(t):
+    if "gab-attach" in str(t.get("command", "")):
+        return True
+    if t.get("label") == "Abrir meus terminais" and "dependsOn" in t:
+        return True
+    return False
+
+alheias, doc = [], {}
+try:
+    with open(TASKS) as f:
+        bruto = f.read()
+    bruto = "\n".join(l for l in bruto.split("\n") if not l.strip().startswith("//"))
+    bruto = re.sub(r",(\s*[}\]])", r"\1", bruto)
+    doc = json.loads(bruto)
+    alheias = [t for t in doc.get("tasks", []) if not nossa(t)]
+except (OSError, ValueError):
+    alheias, doc = [], {}
+
+tasks = alheias + tasks
+
+saida = {k: v for k, v in doc.items() if k not in ("version", "tasks")}
+saida = {"version": doc.get("version", "2.0.0"), "tasks": tasks, **saida}
+
+os.makedirs(os.path.dirname(TASKS), exist_ok=True)
+# Nome unico por processo: os hooks do tmux podem disparar dois syncs ao mesmo
+# tempo (criar sessao + fechar aba, por exemplo). Com nome fixo os dois escreviam
+# o mesmo .tmp e o os.replace de um falhava.
+tmp = TASKS + f".tmp.{os.getpid()}"
+with open(tmp, "w") as f:
+    f.write("// GERADO AUTOMATICAMENTE por ~/bin/gab-terminais-sync\n")
+    f.write("// Nao edite: e reescrito toda vez que voce cria/fecha/renomeia um terminal.\n")
+    f.write("// Uma aba aqui = uma sessao tmux viva em segundo plano.\n")
+    json.dump(saida, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+try:
+    os.replace(tmp, TASKS)
+except OSError:
+    # outro sync concorrente ja gravou uma versao equivalente
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+print(f"{len(sessions)} terminal(is) salvos: {', '.join(sessions) or '(nenhum)'}")

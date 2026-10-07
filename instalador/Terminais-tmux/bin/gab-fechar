@@ -1,0 +1,77 @@
+#!/bin/bash
+# Encerra de proposito uma sessao tmux — e a aba some da lista no sync seguinte.
+#
+# E o contrapeso de "todo terminal vira aba salva": como nenhuma sessao morre
+# sozinha, precisa existir um jeito explicito de tirar uma da lista.
+#
+#   gab-fechar              -> lista as sessoes e o que esta rodando em cada uma
+#   gab-fechar NOME         -> encerra NOME (recusa se tiver programa rodando)
+#   gab-fechar -f NOME      -> encerra mesmo com programa rodando / aba aberta
+
+set -u
+export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/bin:$PATH"
+
+FORCE=0
+[ "${1:-}" = "-f" ] && { FORCE=1; shift; }
+
+command -v tmux >/dev/null 2>&1 || { echo "tmux nao encontrado."; exit 1; }
+
+if [ -z "${1:-}" ]; then
+  echo "Sessoes vivas:"
+  tmux list-sessions -F '#{session_name}' 2>/dev/null | while IFS= read -r s; do
+    pane=$(tmux list-panes -t "=$s" -F '#{pane_pid}' 2>/dev/null | head -1)
+    prog=""
+    [ -n "$pane" ] && prog=$(pgrep -P "$pane" 2>/dev/null | head -1 | xargs -I{} ps -o comm= -p {} 2>/dev/null)
+    # display -p NAO aceita o prefixo '=' (tmux 3.7c volta string vazia, mesmo
+    # com list-panes/has-session aceitando). Sem o '=' aqui, e vazio vira 0.
+    anexos=$(tmux display -p -t "$s" '#{session_attached}' 2>/dev/null)
+    printf '  %-24s %s%s\n' "$s" "${prog:-livre}" \
+      "$([ "${anexos:-0}" != "0" ] && echo '  [aba aberta]')"
+  done
+  echo
+  echo "uso: gab-fechar NOME    (ou -f NOME para forcar)"
+  exit 0
+fi
+
+S="$1"
+tmux has-session -t "=$S" 2>/dev/null || { echo "gab-fechar: nao existe sessao '$S'"; exit 1; }
+
+if [ "$FORCE" -eq 0 ]; then
+  pane=$(tmux list-panes -t "=$S" -F '#{pane_pid}' 2>/dev/null | head -1)
+  if [ -n "$pane" ] && [ -n "$(pgrep -P "$pane" 2>/dev/null)" ]; then
+    prog=$(pgrep -P "$pane" | head -1 | xargs -I{} ps -o comm= -p {} 2>/dev/null)
+    echo "gab-fechar: '$S' tem '$prog' rodando. Use -f para encerrar assim mesmo."
+    exit 1
+  fi
+  # detach-on-destroy off: matar uma sessao com cliente anexado MIGRA esse
+  # cliente para outra sessao em vez de fechar a aba — foi o que ja empilhou
+  # varios clientes numa sessao so. Melhor avisar do que surpreender.
+  anexos=$(tmux display -p -t "$S" '#{session_attached}' 2>/dev/null)
+  if [ "${anexos:-0}" != "0" ]; then
+    echo "gab-fechar: '$S' esta aberta numa aba do VS Code."
+    echo "Feche a aba antes, ou use -f (a aba vai pular para outra sessao)."
+    exit 1
+  fi
+fi
+
+tmux kill-session -t "=$S" && echo "sessao '$S' encerrada."
+
+# Encerrar e a unica forma de esquecer um nome escolhido a mao. Sem isto o
+# registro (~/.gab-terminais-nomes.json) recriaria a sessao no proximo reboot,
+# e "fechei e voltou" e pior do que nao ter fechado.
+python3 - "$S" <<'PYEOF' 2>/dev/null || true
+import json, os, sys
+reg = os.path.expanduser("~/.gab-terminais-nomes.json")
+try:
+    with open(reg) as f:
+        d = json.load(f)
+except (OSError, ValueError):
+    raise SystemExit
+if d.pop(sys.argv[1], None) is not None:
+    with open(reg, "w") as f:
+        json.dump(d, f, indent=2, ensure_ascii=False)
+    print("nome '%s' removido do registro." % sys.argv[1])
+PYEOF
+# O hook session-closed ja dispara o sync; roda aqui tambem para o caso de a
+# sessao encerrada ser a ultima e o hook nao chegar a rodar.
+"$HOME/bin/gab-terminais-sync" >/dev/null 2>&1 || true

@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+# Fotografa cada sessao tmux: texto da tela + programa rodando.
+# Roda a cada 5 min (LaunchAgent) e quando voce fecha uma aba (hook do tmux).
+import json, os, re, subprocess, time
+
+HOME = os.path.expanduser("~")
+
+
+def gravar_seguro(caminho, texto):
+    """Grava sem risco de arquivo vazio num travamento: escreve num .tmp, forca
+    o disco (fsync) e so entao troca. A versao boa anterior fica em
+    <arquivo>.anterior, que os leitores usam se o principal vier estragado."""
+    tmp = f"{caminho}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        f.write(texto)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        with open(caminho) as f:
+            velho = f.read()
+        ant = f"{caminho}.anterior"
+        if len(velho.strip()) > 2 and (velho != texto or not os.path.exists(ant)):
+            with open(ant + ".tmp", "w") as f:
+                f.write(velho)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(ant + ".tmp", ant)
+    except OSError:
+        pass
+    os.replace(tmp, caminho)
+
+def ler_json_seguro(caminho, padrao):
+    """Le o JSON; se o arquivo estiver vazio ou cortado, usa o .anterior."""
+    for c in (caminho, caminho + ".anterior"):
+        try:
+            with open(c) as f:
+                d = json.load(f)
+            if d:
+                return d
+        except (OSError, ValueError):
+            pass
+    return padrao
+DEST = os.path.join(HOME, ".gab-terminais-telas")
+LINHAS = "100000"
+TMUX = next((b for b in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", os.path.expanduser("~/bin/tmux"), "/opt/local/bin/tmux")
+             if os.access(b, os.X_OK)), None)
+
+# Programas que vale a pena relancar sozinhos apos um reboot.
+RELANCAVEIS = re.compile(
+    r"^(npm|pnpm|yarn|node|next|vite|python3?|claude|gab-claude|tail|watch|bun|deno)\b")
+
+def t(*a):
+    return subprocess.run([TMUX, *a], capture_output=True, text=True).stdout
+
+def slug(nome):
+    return re.sub(r"[^A-Za-z0-9]+", "_", nome).strip("_") or "sem_nome"
+
+if not TMUX:
+    raise SystemExit(0)
+os.makedirs(DEST, exist_ok=True)
+
+linhas = [l for l in t("list-panes", "-a", "-F",
+          "#{session_name}\t#{pane_id}\t#{pane_pid}").split("\n") if l.strip()]
+
+vistos, snap = set(), {}
+programas_antes = ler_json_seguro(os.path.join(DEST, "programas.json"), {})
+for l in linhas:
+    sess, pane, pid = l.split("\t")
+    if sess.startswith("__") or sess in vistos:
+        continue
+    vistos.add(sess)
+    s = slug(sess)
+
+    # 1) texto da tela
+    texto = t("capture-pane", "-p", "-S", "-" + LINHAS, "-t", pane)
+    # Tela quase vazia NAO apaga uma tela com conteudo: depois de um travamento
+    # as sessoes podem voltar em branco, e regravar aqui perdia o historico.
+    arq = os.path.join(DEST, s + ".txt")
+    cheias = [x for x in texto.split("\n") if x.strip()]
+    try:
+        with open(arq) as f:
+            velhas = [x for x in f.read().split("\n") if x.strip()]
+    except OSError:
+        velhas = []
+    em_branco = len(cheias) <= 2 and len(velhas) > 2
+    if not em_branco:
+        gravar_seguro(arq, texto.rstrip("\n") + "\n")
+
+    # 2) programa em primeiro plano (filho do shell do painel)
+    cmd = ""
+    # varre o proprio processo do painel e ate 2 niveis de descendentes
+    fila, nivel = [pid], 0
+    while fila and nivel <= 2 and not cmd:
+        proximos = []
+        for c in fila:
+            args = subprocess.run(["ps", "-o", "args=", "-p", c],
+                                  capture_output=True, text=True).stdout.strip()
+            if args:
+                base = os.path.basename(args.split(" ")[0])
+                if RELANCAVEIS.match(base):
+                    cmd = args
+                    break
+            proximos += subprocess.run(["pgrep", "-P", c],
+                                       capture_output=True, text=True).stdout.split()
+        fila, nivel = proximos, nivel + 1
+    # Sessao em branco (recriada vazia) guarda o programa que rodava antes.
+    snap[sess] = cmd or (programas_antes.get(sess, "") if em_branco else "")
+
+gravar_seguro(os.path.join(DEST, "programas.json"),
+              json.dumps(snap, indent=2, ensure_ascii=False))
+# Mapa sessao -> conversa do Claude: precisa estar fresco na hora do reboot,
+# senao o restore devolve a conversa errada em cada terminal.
+subprocess.run([os.path.join(HOME, "bin", "gab-conversas-mapear")],
+               capture_output=True, timeout=120)
+
+print(f"[{time.strftime('%H:%M:%S')}] {len(vistos)} tela(s) salvas: "
+      + ", ".join(f"{k}{' + ' + v.split()[0] if v else ''}" for k, v in snap.items()))

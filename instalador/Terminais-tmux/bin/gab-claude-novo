@@ -1,0 +1,12 @@
+#!/bin/bash
+# Abre o Claude Code em uma conversa NOVA, sem retomar nada.
+#
+# Por que existe: o gab-terminais-restore so sabe duas saidas para uma sessao
+# que rodava claude — "claude --resume <id>" quando ha mapa, ou gab-claude
+# (--continue) quando nao ha. Para uma sessao que abriu o claude mas ainda nao
+# trocou nenhuma mensagem, nao existe id; cair no --continue faria varias
+# sessoes voltarem na MESMA conversa da pasta. Este script e a terceira saida.
+#
+# O nome nao pode terminar em "claude": o restore reescreve o comando quando o
+# primeiro token termina assim. Terminando em "-novo", ele passa intacto.
+exec claude "$@"

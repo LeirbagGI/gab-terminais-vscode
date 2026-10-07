@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+# Renomeia uma sessao tmux DE FORA dela, levando junto tudo o que e indexado
+# pelo nome.
+#
+#   gab-renomear "NOME ANTIGO" "NOME NOVO"
+#
+# Por que existe: `gab-nome` so renomeia a sessao em que voce esta, e so no
+# tmux. Mas o nome da sessao e chave em CINCO lugares. Renomear so no tmux faz
+# a sessao voltar do proximo reboot sem historico e retomando a conversa
+# errada, porque o restore procura tudo pelo nome novo e nao acha nada:
+#
+#   ~/.gab-terminais-conversas.json   nome -> id da conversa do Claude
+#   ~/.gab-terminais-telas/programas.json   nome -> programa a relancar
+#   ~/.gab-terminais.json             manifesto lido no login
+#   ~/.gab-terminais-nomes.json       registro dos nomes escolhidos a mao
+#   ~/.gab-terminais-telas/<slug>.txt e <slug>.boot.zsh   tela salva e boot
+#
+# Depois de renomear, dispara o sync para a lista de abas acompanhar.
+
+import json, os, re, subprocess, sys
+
+HOME = os.path.expanduser("~")
+TELAS = os.path.join(HOME, ".gab-terminais-telas")
+
+def slug(nome):
+    return re.sub(r"[^A-Za-z0-9]+", "_", nome).strip("_") or "sem_nome"
+
+def tmux_bin():
+    for b in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", os.path.expanduser("~/bin/tmux"), "/opt/local/bin/tmux"):
+        if os.access(b, os.X_OK):
+            return b
+    return "tmux"
+
+if len(sys.argv) != 3:
+    print("uso: gab-renomear \"NOME ANTIGO\" \"NOME NOVO\"", file=sys.stderr)
+    sys.exit(2)
+
+velho, novo = sys.argv[1], sys.argv[2].strip()
+TMUX = tmux_bin()
+
+if not novo:
+    print("o nome novo nao pode ficar vazio", file=sys.stderr)
+    sys.exit(2)
+if re.fullmatch(r"terminal-\d+", novo):
+    # Nome automatico e descartavel: um terminal-N vazio nao entra no manifesto
+    # e nao volta depois do reboot. Renomear PARA esse padrao seria rebaixar um
+    # terminal salvo sem avisar.
+    print("'%s' e um nome automatico: use gab-fechar se a intencao e descartar."
+          % novo, file=sys.stderr)
+    sys.exit(2)
+
+# O prefixo "=" e obrigatorio no -t para nome exato (has-session aceita).
+if subprocess.run([TMUX, "has-session", "-t", "=" + velho],
+                  capture_output=True).returncode != 0:
+    print("sessao '%s' nao existe" % velho, file=sys.stderr)
+    sys.exit(1)
+if subprocess.run([TMUX, "has-session", "-t", "=" + novo],
+                  capture_output=True).returncode == 0:
+    print("ja existe uma sessao chamada '%s'" % novo, file=sys.stderr)
+    sys.exit(1)
+
+r = subprocess.run([TMUX, "rename-session", "-t", "=" + velho, novo],
+                   capture_output=True, text=True)
+if r.returncode != 0:
+    print("tmux recusou o rename: %s" % r.stderr.strip(), file=sys.stderr)
+    sys.exit(1)
+
+def migrar_dict(caminho, chave_valor_padrao=None):
+    """Move a chave do nome velho para o novo, preservando o resto do arquivo."""
+    try:
+        with open(caminho) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if velho not in d:
+        return False
+    d[novo] = d.pop(velho)
+    tmp = caminho + ".tmp.%d" % os.getpid()
+    with open(tmp, "w") as f:
+        json.dump(d, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, caminho)
+    return True
+
+mudou = []
+if migrar_dict(os.path.join(HOME, ".gab-terminais-conversas.json")):
+    mudou.append("conversa")
+if migrar_dict(os.path.join(TELAS, "programas.json")):
+    mudou.append("programa")
+if migrar_dict(os.path.join(HOME, ".gab-terminais-nomes.json")):
+    mudou.append("registro")
+
+# Manifesto e uma LISTA de {nome, cwd}, nao um dicionario.
+man = os.path.join(HOME, ".gab-terminais.json")
+try:
+    with open(man) as f:
+        itens = json.load(f)
+    if any(i.get("nome") == velho for i in itens):
+        for i in itens:
+            if i.get("nome") == velho:
+                i["nome"] = novo
+        tmp = man + ".tmp.%d" % os.getpid()
+        with open(tmp, "w") as f:
+            json.dump(itens, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, man)
+        mudou.append("manifesto")
+except (OSError, ValueError):
+    pass
+
+for ext in (".txt", ".boot.zsh"):
+    a = os.path.join(TELAS, slug(velho) + ext)
+    b = os.path.join(TELAS, slug(novo) + ext)
+    if os.path.isfile(a):
+        os.replace(a, b)
+        mudou.append("tela" if ext == ".txt" else "boot")
+
+# A lista de abas acompanha. O rename ja dispara o hook after-rename-session,
+# mas chamar aqui garante o resultado mesmo se o hook estiver desligado.
+subprocess.run([os.path.join(HOME, "bin", "gab-terminais-sync")],
+               capture_output=True)
+
+print("%s -> %s  (levou junto: %s)" % (velho, novo, ", ".join(mudou) or "nada"))

@@ -1,0 +1,47 @@
+#!/bin/bash
+# Aponta a aba ATUAL para outra sessao tmux, sem abrir aba nova.
+#
+#   gab-ir            -> lista as sessoes e marca onde voce esta
+#   gab-ir GABOT      -> esta aba passa a mostrar a sessao GABOT
+#
+# Por que existe: as abas do VS Code sao montadas no folderOpen, entao uma
+# sessao criada/renomeada depois so aparece na lista apos um reload. Com isto
+# voce alcanca qualquer sessao viva na hora, de dentro de qualquer aba.
+#
+# Nao usar "gab-attach" para isto: rodando de dentro de uma sessao, ele
+# aninharia um tmux dentro do outro. switch-client troca o que ESTA aba mostra;
+# a sessao de origem continua viva e intacta em segundo plano.
+
+set -u
+export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/bin:$PATH"
+
+command -v tmux >/dev/null 2>&1 || { echo "tmux nao encontrado."; exit 1; }
+
+if [ -z "${TMUX:-}" ]; then
+  echo "gab-ir: rode de dentro de um terminal do VS Code (sessao tmux)."
+  echo "Fora do tmux, use: gab-attach NOME"
+  exit 1
+fi
+
+ATUAL=$(tmux display -p '#{session_name}' 2>/dev/null)
+
+if [ -z "${1:-}" ]; then
+  echo "Sessoes vivas (voce esta em: $ATUAL)"
+  tmux list-sessions -F '#{session_name}' 2>/dev/null | while IFS= read -r s; do
+    pane=$(tmux list-panes -t "=$s" -F '#{pane_pid}' 2>/dev/null | head -1)
+    prog=$(pgrep -P "${pane:-0}" 2>/dev/null | head -1 | xargs -I{} ps -o comm= -p {} 2>/dev/null)
+    marca="  "; [ "$s" = "$ATUAL" ] && marca="> "
+    printf '%s%-24s %s\n' "$marca" "$s" "${prog:-livre}"
+  done
+  echo
+  echo "uso: gab-ir NOME"
+  exit 0
+fi
+
+S="$1"
+tmux has-session -t "=$S" 2>/dev/null || { echo "gab-ir: nao existe sessao '$S'"; exit 1; }
+[ "$S" = "$ATUAL" ] && { echo "gab-ir: voce ja esta em '$S'."; exit 0; }
+
+# switch-client so move ESTE cliente. Nada e encerrado: a sessao que voce
+# deixa continua rodando e voce volta nela com "gab-ir NOME" a qualquer momento.
+tmux switch-client -t "=$S"

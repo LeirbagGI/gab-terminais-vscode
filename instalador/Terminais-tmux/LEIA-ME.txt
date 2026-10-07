@@ -1,0 +1,53 @@
+TERMINAIS TMUX — terminais do VS Code que nunca se perdem
+==========================================================
+
+O que faz
+---------
+Todo terminal que você abre no VS Code passa a rodar "por trás" no tmux.
+Você pode fechar o VS Code, reiniciar o Mac, e os terminais continuam lá:
+o texto que estava na tela volta, e se era o Claude Code rodando, ele
+volta na mesma conversa.
+
+Precisa de
+----------
+- Mac com VS Code instalado em /Applications
+- Homebrew (https://brew.sh), para o instalador conseguir instalar o tmux
+- python3 (se faltar, o instalador avisa: rode  xcode-select --install )
+
+Instalar
+--------
+1. Descompacte o .zip.
+2. Abra o Terminal (o app Terminal do Mac, não o do VS Code).
+3. Arraste o arquivo  instalar.sh  para dentro do Terminal, escrevendo antes
+   "bash " — fica assim:
+       bash /caminho/que/apareceu/instalar.sh
+   e aperte Enter.
+4. Feche e abra o VS Code.
+
+Pronto: abra um terminal (Ctrl+`) e ele já nasce salvo.
+
+Uso do dia a dia
+----------------
+- Dar nome a um terminal (recomendado — terminais com nome nunca somem):
+      gab-nome MEU PROJETO
+- Ver todos os terminais e o que roda em cada um:     gab-fechar
+- Encerrar um terminal de vez:                          gab-fechar NOME
+- Renomear um terminal de fora dele:                    gab-renomear NOME NOVO
+- Pular esta aba para outro terminal:                   gab-ir NOME
+- Na barra lateral do VS Code (Explorer) aparece "Terminais Tmux" com
+  todos os terminais guardados: clique para abrir.
+
+Bom saber
+---------
+- Terminais sem nome e vazios (sem nada escrito) não são guardados de
+  propósito, senão a lista só cresceria. Dê um nome com gab-nome.
+- Se o terminal parecer "travado" depois de rolar a tela com o mouse,
+  aperte q ou Esc (é o modo de rolagem do tmux).
+- Depois de atualizar o macOS, o Claude Code pode perguntar de novo se você
+  confia na pasta ("trust this folder"). Escolha "Yes" — a opção que já vem
+  marcada é "No, exit".
+- Registro do que acontece no login: ~/Library/Logs/gab-terminais.log
+
+Remover
+-------
+    bash desinstalar.sh

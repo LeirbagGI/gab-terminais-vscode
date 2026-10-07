@@ -1,0 +1,23 @@
+#!/bin/bash
+# Perfil padrao do VS Code: todo terminal novo vira uma sessao tmux persistente.
+# Renomeie depois com:  Ctrl+b  $     (ou: gab-nome NOVONOME)
+# Contrato de shell POSIX: o VS Code invoca o perfil padrao como
+#   shell -c "comando"      (ao rodar tasks)
+# Sem este bloco, "-c" era lido como nome de sessao — foi assim que nasceu a
+# sessao "-c" e os 6 paineis espelhados, e o comando real era descartado.
+case "$1" in
+  -*) exec /bin/zsh "$@" ;;
+esac
+
+# O VS Code nem sempre herda o PATH do Homebrew. Sem isto o "tmux has-session"
+# abaixo falha calado, todo terminal novo vira "terminal-1" e cada aba nova
+# ROUBA a anterior (o gab-attach usa -D).
+export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/bin:$PATH"
+
+NAME="$1"
+if [ -z "$NAME" ]; then
+  N=1
+  while tmux has-session -t "=terminal-$N" 2>/dev/null; do N=$((N+1)); done
+  NAME="terminal-$N"
+fi
+exec "$HOME/bin/gab-attach" "$NAME" "$PWD"
