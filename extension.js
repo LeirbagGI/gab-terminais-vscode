@@ -440,9 +440,8 @@ function registrarAbertas(encolher = false) {
     const antes = JSON.stringify(salvas);
     try {
       if (JSON.stringify(final) === antes) return;
-      const tmp = ARQ_ABERTAS + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(final, null, 2));
-      fs.renameSync(tmp, ARQ_ABERTAS);
+      if ((lerLista(ARQ_ABERTAS) || []).length) fs.copyFileSync(ARQ_ABERTAS, ARQ_ABERTAS + '.anterior');
+      gravarSeguro(ARQ_ABERTAS, JSON.stringify(final, null, 2));
     } catch (e) { /* sem registro e melhor do que quebrar a janela */ }
   }, 2500);
 }
@@ -455,18 +454,45 @@ const rotuloDe = (x) => (typeof x === 'string' ? x : x.aba || x.sessao);
 // usuario fechou esta aba", o registro encolheria ate sobrar pouco ou nada.
 let encerrando = false;
 
-function abertasSalvas() {
+function lerLista(arq) {
   try {
-    const l = JSON.parse(fs.readFileSync(ARQ_ABERTAS, 'utf8'));
-    return Array.isArray(l) ? l.filter((x) => x && nomeDe(x)) : [];
-  } catch (e) { return []; }
+    const l = JSON.parse(fs.readFileSync(arq, 'utf8'));
+    return Array.isArray(l) ? l : null;
+  } catch (e) { return null; }
+}
+
+// Num travamento (Mac desligado na marra) o arquivo pode voltar vazio ou
+// cortado. Por isso ha uma copia (.anterior) e, por ultimo, a ordem conhecida.
+function abertasSalvas() {
+  for (const arq of [ARQ_ABERTAS, ARQ_ABERTAS + '.anterior', ARQ_ORDEM]) {
+    const l = (lerLista(arq) || []).filter((x) => x && nomeDe(x));
+    if (l.length) {
+      if (arq !== ARQ_ABERTAS) log(`lista de abas lida de ${path.basename(arq)} (a principal estava vazia ou corrompida)`);
+      return l;
+    }
+  }
+  return [];
+}
+
+// Grava com fsync: sem ele, um travamento logo depois pode deixar o arquivo vazio.
+function gravarSeguro(arq, texto) {
+  const tmp = `${arq}.tmp`;
+  const fd = fs.openSync(tmp, 'w');
+  try { fs.writeSync(fd, texto); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  fs.renameSync(tmp, arq);
 }
 
 // Reabre exatamente o que estava aberto, e so o que ainda existe no tmux.
-async function reabrirAbertas() {
+// forcar=true: abre a aba mesmo que a sessao ainda nao exista. O gab-attach
+// chama `gab-terminais-restore --so NOME` e recria a sessao na hora (com
+// historico e programa). Sem isto um Mac que travou voltava SEM NENHUMA aba: o
+// restore do login espera ate 5 min pelas pastas (Google Drive) antes de criar
+// qualquer sessao, e a extensao desistia em 3 min.
+async function reabrirAbertas(forcar = false) {
   const querendo = await porData(abertasSalvas());
   if (!querendo.length) return { criados: 0, total: 0 };
   const vivas = new Set((await sessoesVivas()).map((s) => s.nome));
+  const noManifesto = new Set((lerLista(MANIFESTO) || []).map((i) => i && i.nome));
   await adotarExistentes();
   const jaEmAbas = await sessoesEmAbasDoVSCode();
   const corDoSync = new Map(((await queViramAba()) || [])
@@ -474,7 +500,16 @@ async function reabrirAbertas() {
   let criados = 0;
   for (const item of querendo) {
     const nome = nomeDe(item);
-    if (!vivas.has(nome) || vivo(abertos.get(nome))) continue;
+    if (vivo(abertos.get(nome))) continue;
+    if (!vivas.has(nome)) {
+      if (!forcar) continue;
+      // terminal-N sem nome e fora do manifesto era vazio: nao volta.
+      if (/^terminal-\d+$/.test(nome) && !aparenciaDe(nome).nome && !noManifesto.has(nome)) continue;
+      log(`sessao ${nome} ainda nao existe: abrindo a aba, o gab-attach recria`);
+      abrir(nome, null, false, rotuloDe(item));
+      criados++;
+      continue;
+    }
     if (jaEmAbas.has(nome)) {
       log(`nao reabri ${nome}: ja esta numa aba do VS Code`);
       continue;
@@ -514,7 +549,7 @@ function gravarOrdemConhecida(lista) {
   let antes = null;
   try { antes = fs.readFileSync(ARQ_ORDEM, 'utf8'); } catch (e) { /* primeira vez */ }
   const agora = JSON.stringify(lista);
-  if (agora !== antes) try { fs.writeFileSync(ARQ_ORDEM, agora); } catch (e) { /* ok */ }
+  if (agora !== antes) try { gravarSeguro(ARQ_ORDEM, agora); } catch (e) { /* ok */ }
 }
 
 function ordemFoiArrumada(trazidas) {
@@ -596,8 +631,11 @@ async function restaurarNoLogin() {
     log(`ordem arrumada pela pessoa (${trazidas.join(', ')}): nao reorganizo mais por data`);
   }
   try {
+    const comeco = Date.now();
     for (;;) {
-      await reabrirAbertas();
+      // Primeiros 20 s: so o que ja existe (o VS Code e o restore do login
+      // costumam trazer tudo). Depois disso, abre o que falta mesmo assim.
+      await reabrirAbertas(Date.now() - comeco > 20000);
       const vivas = new Set((await sessoesVivas()).map((s) => s.nome));
       if (querendo.every((n) => vivas.has(nomeDe(n))) || Date.now() > prazo) break;
       await new Promise((r) => setTimeout(r, 5000));
